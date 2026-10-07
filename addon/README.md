@@ -35,7 +35,8 @@ ticket and publish time.
 ## Install
 
 ```
-orch addon install <path or git URL of orch-apps> --path addon
+orch addon install <git URL of orch-apps> --path addon     # from the repository
+orch addon install <checkout>/addon                        # from a local checkout: name the addon folder
 orch addon trust orch-apps
 orch addon enable orch-apps
 ```
