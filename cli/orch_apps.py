@@ -207,12 +207,17 @@ def rsync(cfg: dict, src: Path, dest: str, stats: bool = False) -> dict:
         argv.append("--stats")
     argv += ["-e", " ".join(["ssh", *ssh_options(cfg)]), f"{src}/", f"{cfg['ssh']}:{dest}/"]
     res = run(argv)
+    # GNU rsync and macOS's openrsync label their --stats differently
+    labels = (("files", ("Number of files:",)),
+              ("transferred", ("Number of regular files transferred:", "Number of files transferred:")),
+              ("bytes_sent", ("Total bytes sent:", "Total sent:")))
     found = {}
     for line in (res.stdout or "").splitlines():
-        for key, label in (("files", "Number of files:"), ("transferred", "Number of regular files transferred:"),
-                           ("bytes_sent", "Total bytes sent:")):
-            if line.startswith(label):
-                found[key] = int(re.sub(r"[^\d].*", "", line[len(label):].strip().replace(",", "").replace("'", "")) or 0)
+        for key, options in labels:
+            for label in options:
+                if line.startswith(label):
+                    digits = re.match(r"[\d,.']+", line[len(label):].strip())
+                    found[key] = int(re.sub(r"\D", "", digits.group(0))) if digits else 0
     return found
 
 
@@ -769,7 +774,7 @@ def cmd_test(args) -> dict:
     app = apps_dir(args) / slug
     if not app.is_dir():
         raise Refused(f"no app at {app} (orch-apps new {slug} --stack … --store …)")
-    say = (lambda *_: None) if args.json else print
+    say = (lambda *_: None) if args.json else (lambda *a: print(*a, flush=True))
     res = run_checks(app, slug, say)
     return {**res, "result": "passed"}
 
@@ -787,7 +792,7 @@ def cmd_deploy(args) -> dict:
     app = apps_dir(args) / slug
     if not app.is_dir():
         raise Refused(f"no app at {app}")
-    say = (lambda *_: None) if args.json else print
+    say = (lambda *_: None) if args.json else (lambda *a: print(*a, flush=True))
     try:
         run_checks(app, slug, say)
     except (Refused, Failed) as e:
@@ -876,7 +881,9 @@ def human(cmd: str, res) -> str:
     if cmd == "test":
         return f"passed: {res['slug']} works like it will on the host"
     if cmd == "deploy":
-        lines = [f"{res.get('result')} {res['slug']} {res.get('version', '')}: {res['url']}"]
+        health = ("health check on the host passed, running" if res.get("status") == "running"
+                  else "unchanged, still running" if res.get("result") == "unchanged" else res.get("status", ""))
+        lines = [f"{res.get('result')} {res['slug']} {res.get('version', '')}: {health}", f"open {res['url']}"]
         if res.get("secret_url"):
             lines.append(f"secret link (shown once): {res['secret_url']}")
         return "\n".join(lines)
