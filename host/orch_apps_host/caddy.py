@@ -33,6 +33,18 @@ def snippet(slug: str, app: dict) -> str:
     return "\n".join(out) + "\n"
 
 
+def service_env() -> dict:
+    """Caddy's environment as systemd gives it: other sites may use {$VARS} set only in a drop-in, so validating
+    without them would refuse a config the running Caddy accepts."""
+    res = util.run(["systemctl", "show", "caddy", "--property=Environment", "--value"], ok=False)
+    env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/var/lib/caddy"}
+    for item in (res.stdout or "").split():
+        key, eq, value = item.partition("=")
+        if eq and key.isidentifier():
+            env[key] = value
+    return env
+
+
 def apply(slug: str, text: str | None) -> None:
     """Write (or with None remove) the snippet, validate, reload; restore the previous snippet on failure."""
     util.P.caddy.mkdir(parents=True, exist_ok=True)
@@ -45,7 +57,8 @@ def apply(slug: str, text: str | None) -> None:
     else:
         path.write_text(text)
         path.chmod(0o644)
-    res = util.run(["caddy", "validate", "--config", CADDYFILE, "--adapter", "caddyfile"], ok=False)
+    res = util.run(["caddy", "validate", "--config", CADDYFILE, "--adapter", "caddyfile"], ok=False,
+                   env=service_env())
     if res.returncode != 0:
         if before is None:
             path.unlink(missing_ok=True)

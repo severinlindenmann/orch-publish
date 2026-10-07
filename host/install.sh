@@ -80,7 +80,10 @@ if [ -f "$site" ]; then prev="$(mktemp)"; cp -a "$site" "$prev"; fi
 sed "s/__DOMAIN__/$DOMAIN/g" "$HERE/caddy/site.caddy" > "$site.new"
 chmod 644 "$site.new"
 mv "$site.new" "$site"
-if caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>"/tmp/orch-apps-caddy.err"; then
+# validate with Caddy's own service environment: other sites may use {$VARS} from a systemd drop-in
+read -r -a caddy_env <<< "$(systemctl show caddy --property=Environment --value)"
+if env "${caddy_env[@]}" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile \
+    >/dev/null 2>"/tmp/orch-apps-caddy.err"; then
   systemctl reload caddy
   [ -n "$prev" ] && rm -f "$prev"
   echo "caddy: valid, reloaded"
