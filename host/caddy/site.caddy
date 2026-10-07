@@ -1,0 +1,32 @@
+# /etc/caddy/sites/__DOMAIN__.caddy, installed by orch-apps host/install.sh.
+#
+# A SEPARATE file, imported by the shared /etc/caddy/Caddyfile through `import /etc/caddy/sites/*.caddy`.
+# Removing this file removes orch-apps from Caddy completely.
+#
+# Shares live under /s/ and are answered by the share server (127.0.0.1:8790); each app adds one generated snippet
+# in /etc/caddy/orch-apps/. No `log` block on purpose: secret links carry their token in the path.
+
+__DOMAIN__ {
+	encode zstd gzip
+
+	request_body {
+		max_size 1MB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	handle /s/* {
+		reverse_proxy 127.0.0.1:8790
+	}
+
+	import /etc/caddy/orch-apps/*.caddy
+
+	handle {
+		respond "Nothing is published at this address." 404
+	}
+}

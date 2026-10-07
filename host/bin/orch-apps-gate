@@ -1,0 +1,31 @@
+#!/bin/sh
+# Forced command of the orch-apps SSH key (authorized_keys: restrict,command="/usr/local/bin/orch-apps-gate").
+# The key can do exactly two things: rsync into /srv/orch-apps/incoming, or run orch-apps-host with arguments
+# that orch-apps-host validates itself. No shell, no other command. Every request is logged to the journal.
+set -eu
+set -f  # the words of the request are split below; never expand them as globs
+
+cmd="${SSH_ORIGINAL_COMMAND:-}"
+log() { logger -t orch-apps-gate -- "$1" 2>/dev/null || true; }
+
+case "$cmd" in
+  "rsync --server --sender"*)
+    log "refused: download"
+    echo "not allowed: reading from the server" >&2
+    exit 1
+    ;;
+  "rsync --server"*)
+    log "upload"
+    exec /usr/bin/rrsync -wo /srv/orch-apps/incoming
+    ;;
+  "share "*|"app "*|"status"|"status --json"|"backup")
+    log "run: $cmd"
+    # shellcheck disable=SC2086
+    exec sudo -n /usr/local/bin/orch-apps-host $cmd
+    ;;
+  *)
+    log "refused: ${cmd:-interactive shell}"
+    echo "not allowed: ${cmd:-interactive shell}" >&2
+    exit 1
+    ;;
+esac

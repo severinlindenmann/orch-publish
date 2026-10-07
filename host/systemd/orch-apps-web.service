@@ -1,0 +1,33 @@
+# The orch-apps share server: serves /s/<id>/ and the secret-link checks, behind Caddy on 127.0.0.1:8790.
+[Unit]
+Description=orch-apps share server
+After=network.target
+
+[Service]
+Type=simple
+User=orch-apps-web
+Group=orch-apps-web
+StateDirectory=orch-apps-web
+Environment=PYTHONPATH=/usr/local/lib/orch-apps
+ExecStart=/usr/bin/python3 -B -m orch_apps_host.server
+Restart=on-failure
+RestartSec=3
+
+MemoryMax=128M
+UMask=0027
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/orch-apps-web
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

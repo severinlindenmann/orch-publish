@@ -1,0 +1,6 @@
+[Unit]
+Description=orch-apps: remove files of expired or revoked shares
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/orch-apps-host sweep

@@ -1,0 +1,6 @@
+[Unit]
+Description=orch-apps: back up app data (newest 7 kept)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/orch-apps-host backup
