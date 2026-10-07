@@ -1,0 +1,4 @@
+[
+  {"argv": ["orch-apps", "logs", "*", "--lines", "20"], "returncode": 0,
+   "stdout": "2026-10-07T20:50:01+02:00 trd-bot-orchi-1 node[1]: listening\n2026-10-07T20:51:12+02:00 trd-bot-orchi-1 node[1]: GET / 200\n"}
+]

@@ -1,0 +1,9 @@
+{"argv": ["orch-apps", "staged", "--json"], "returncode": 0, "stdout_json": {"staged": [
+  {"id": "stg0000001", "ticket": "INT-0001", "access": "sealed", "expires": "none", "expires_choice": "done",
+   "source": "/Users/x/Internal/orchestrator/artifacts/INT-0001/index.html", "files": 1, "size": 7153,
+   "staged": "2026-10-07T19:00:00Z", "published": null,
+   "warnings": ["not found next to the page, left as they are: landing/index.html"]},
+  {"id": "stg0000002", "ticket": "INT-0001", "access": "secret", "expires": "2026-10-14T19:00:00Z", "expires_choice": "7d",
+   "source": "/Users/x/report", "files": 3, "size": 2048, "staged": "2026-10-07T19:01:00Z",
+   "published": "2026-10-07T19:02:00Z", "warnings": []}
+]}}

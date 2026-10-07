@@ -137,6 +137,17 @@ class ShareTests(CliCase):
         self.assertIn("#k=", json.loads(out)["url"])
         self.assertEqual(self.cli("reveal", sid)[0], 2, "the second reveal finds nothing")
 
+    def test_discard_drops_an_unpublished_stage_only(self):
+        site = self.page()
+        sid = json.loads(self.cli("share", str(site), "--ticket", "INT-0029", "--access", "sealed", "--json")[1])["id"]
+        self.assertEqual(self.cli("discard", sid)[0], 0)
+        self.assertFalse((oa.STATE / "stage" / sid).exists())
+        sid = json.loads(self.cli("share", str(site), "--ticket", "INT-0029", "--access", "public", "--json")[1])["id"]
+        self.cli("publish", sid, "--hold")
+        code, out = self.cli("discard", sid)
+        self.assertEqual(code, 2)
+        self.assertIn("already published", out)
+
     def test_expiry_values(self):
         self.assertEqual(oa.expiry("done"), "none")
         self.assertTrue(oa.expiry("7d").endswith("Z"))

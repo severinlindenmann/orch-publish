@@ -10,6 +10,7 @@ Shares
   orch-apps publish <id> [--hold]        upload a staged share; prints the link once (or keeps it for `reveal`)
   orch-apps reveal <id>                  print a held link once, then forget its key or token
   orch-apps staged                       shares staged here and not yet published or revealed
+  orch-apps discard <id>                 drop a staged share that is not published
   orch-apps revoke <id> | extend <id> --expires 7d|<ISO>|none
 Apps
   orch-apps new <slug> --stack static|python|node --store sqlite|json|markdown|none
@@ -499,6 +500,15 @@ def cmd_reveal(args) -> dict:
     return {**_public(meta), "url": url}
 
 
+def cmd_discard(args) -> dict:
+    """Drop a staged share that was not published (its key or token goes with it)."""
+    stage, meta = _stage(args.id)
+    if meta.get("published"):
+        raise Refused(f"{args.id} is already published; revoke it with orch-apps revoke {args.id}")
+    shutil.rmtree(stage)
+    return {**_public(meta), "discarded": iso(now())}
+
+
 def cmd_staged(args) -> dict:
     root = STATE / "stage"
     items = []
@@ -834,7 +844,8 @@ def cmd_passthrough(args) -> dict | str:
 
 
 def cmd_status(args) -> dict:
-    return remote_json(load_config(), "status", "--json")
+    cfg = load_config()
+    return {**remote_json(cfg, "status", "--json"), "domain": cfg["domain"]}
 
 
 def cmd_setup(args) -> dict:
@@ -871,6 +882,8 @@ def human(cmd: str, res) -> str:
             return f"published {res['id']}. Show its link once with: {res['next']}"
         tail = "" if res["access"] == "public" else "\nThis link is shown once; orch-apps does not keep its key or token."
         return f"{res['url']}{tail}"
+    if cmd == "discard":
+        return f"discarded {res['id']}; nothing was uploaded"
     if cmd == "staged":
         if not res["staged"]:
             return "nothing staged"
@@ -915,6 +928,7 @@ def build_parser() -> argparse.ArgumentParser:
     pub.add_argument("--hold", action="store_true", help="do not print the link now; show it once with reveal")
     sub.add_parser("reveal", help="print a published share's link once", allow_abbrev=False).add_argument("id")
     sub.add_parser("staged", help="list staged shares", allow_abbrev=False)
+    sub.add_parser("discard", help="drop a staged share that is not published", allow_abbrev=False).add_argument("id")
     sub.add_parser("revoke", help="end a share now", allow_abbrev=False).add_argument("id")
     ext = sub.add_parser("extend", help="change when a share ends", allow_abbrev=False)
     ext.add_argument("id")
@@ -949,7 +963,7 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-COMMANDS = {"share": cmd_share, "publish": cmd_publish, "reveal": cmd_reveal, "staged": cmd_staged,
+COMMANDS = {"share": cmd_share, "publish": cmd_publish, "reveal": cmd_reveal, "staged": cmd_staged, "discard": cmd_discard,
             "new": cmd_new, "test": cmd_test, "deploy": cmd_deploy, "status": cmd_status, "setup": cmd_setup}
 
 

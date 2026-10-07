@@ -1,0 +1,29 @@
+{"argv": ["orch-apps", "status", "--json"], "returncode": 0, "stdout_json": {
+  "host": "trd-bot-orchi-1", "at": "2026-10-07T19:00:38Z", "domain": "app.severin.io",
+  "runtimes": {"caddy": "2.11.4", "node": "24.21.0", "python": "3.13.5", "uv": "0.12.23"},
+  "backup": {"kept": 7, "last": "bak-20261007-181006.tar.gz"},
+  "apps": [
+    {"slug": "dodly", "name": "Dodly", "stack": "node", "store": "sqlite", "access": "public", "ticket": "INT-0030",
+     "version": "a41c9e2b7c10", "status": "running", "message": null, "port": 4201, "deployed_at": "2026-10-07T18:50:00Z",
+     "held": false, "health": "/health", "active": "active", "memory_bytes": 46137344,
+     "active_since": "Wed 2026-10-07 20:50:01 CEST", "data_bytes": 1228800},
+    {"slug": "notes", "name": "Notes", "stack": "static", "store": "markdown", "access": "secret", "ticket": "INT-0031",
+     "version": "c90f1149aa01", "status": "stopped", "message": null, "deployed_at": "2026-10-01T09:00:00Z",
+     "held": true, "health": "/health", "data_bytes": 0},
+    {"slug": "kassenbuch", "name": "Kassenbuch", "stack": "python", "store": "json", "access": "public",
+     "ticket": "INT-0032", "version": "9f04a11c0d22", "status": "running",
+     "message": "deploy of e18b6c0aa111 failed (health /health did not answer 2xx within 30 s); 9f04a11c0d22 is serving again",
+     "failed_version": "e18b6c0aa111", "port": 4202, "deployed_at": "2026-10-06T12:00:00Z", "held": false,
+     "health": "/health", "active": "active", "memory_bytes": 20971520, "data_bytes": 57344}
+  ],
+  "shares": [
+    {"id": "pub0000001", "access": "public", "ticket": "INT-0001", "created": "2026-10-07T18:00:00Z",
+     "expires": "2099-01-01T00:00:00Z", "revoked": null, "files": 4, "size": 1011, "state": "live", "views": 9},
+    {"id": "sec0000001", "access": "secret", "ticket": "INT-0001", "created": "2026-10-07T18:00:00Z",
+     "expires": null, "revoked": null, "files": 5, "size": 2048, "state": "live", "views": 3},
+    {"id": "sea0000001", "access": "sealed", "ticket": "INT-0030", "created": "2026-10-07T18:00:00Z",
+     "expires": "2099-01-01T00:00:00Z", "revoked": null, "files": 1, "size": 667869, "state": "live", "views": 1},
+    {"id": "old0000001", "access": "sealed", "ticket": "INT-0028", "created": "2026-10-07T18:43:04Z",
+     "expires": "2026-10-08T18:42:57Z", "revoked": "2026-10-07T18:43:31Z", "files": 1, "size": 667869,
+     "state": "revoked", "views": 1}
+  ]}}
