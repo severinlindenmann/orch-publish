@@ -1,8 +1,8 @@
 """The share server on 127.0.0.1:8790, run as orch-apps-web behind Caddy.
 
 Routes:
-  /s/<id>/...              a share: public files, secret files (cookie), or the sealed loader and its blob
-  /s/<id>.<token>/...      a secret share's link: checks the token, sets a cookie for /s/<id>/, redirects
+  /s/<id>/...              a share: public files, or the sealed loader and its blob
+  /s/<id>.<token>/...      a secret share: every file under its own address, which carries the token
   /<slug>.<token>/         a secret app's link: same, cookie for /<slug>/
   /_auth/app/<slug>        Caddy forward_auth for secret apps (only reachable from 127.0.0.1)
 
@@ -154,21 +154,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._page(410, "This share has expired or was revoked.", "Share ended")
         access = meta["access"]
 
-        if dot:  # a secret link: check the token, swap it for a cookie, go to the clean address
-            util.check(token, util.TOKEN, "token")
-            if access != "secret" or not hmac.compare_digest(util.token_hash(token), meta["token_hash"]):
-                return self._not_found()
-            cookie = (f"oa_s_{share_id}={_cookie_value(f'share:{share_id}', meta['token_hash'])}; "
-                      f"Path=/s/{share_id}/; HttpOnly; Secure; SameSite=None; Max-Age={self._max_age(meta)}")
-            return self._redirect(f"/s/{share_id}/{rest}", cookie)
-        if not has_slash:
-            return self._redirect(f"/s/{share_id}/")
-
+        # A secret share lives only under /s/<id>.<token>/: every file the page loads, data files fetched by its
+        # scripts included, resolves relative to that address and so carries the token (INT-0027 Q1). A cookie
+        # would not work, because the page runs sandboxed and browsers send no cookie with its fetches.
         if access == "secret":
-            want = _cookie_value(f"share:{share_id}", meta["token_hash"])
-            got = self._cookie(f"oa_s_{share_id}")
-            if not got or not hmac.compare_digest(want, got):
+            if not dot:
                 return self._page(404, "This share needs its secret link.", "Not found")
+            util.check(token, util.TOKEN, "token")
+            if not hmac.compare_digest(util.token_hash(token), meta["token_hash"]):
+                return self._not_found()
+        elif dot:
+            return self._not_found()
+        if not has_slash:
+            return self._redirect(f"/s/{segment}/")
 
         if access == "sealed":
             if rest == "":
@@ -202,10 +200,10 @@ class Handler(BaseHTTPRequestHandler):
         ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
         if ctype.startswith("text/") or ctype in ("application/javascript", "application/json", "image/svg+xml"):
             ctype += "; charset=utf-8"
+        # The sandboxed page has an opaque origin, so its fetches are cross-origin; whoever has the address may read
+        # the file anyway, so "*" gives away nothing.
         headers = {"Cache-Control": "no-store" if access == "secret" else "public, max-age=60",
                    "Content-Security-Policy": SANDBOX, "Access-Control-Allow-Origin": "*"}
-        if access == "secret":
-            headers.pop("Access-Control-Allow-Origin")
         return self._send(200, target.read_bytes(), ctype, headers, head=self.command == "HEAD")
 
     # -- helpers ------------------------------------------------------------------------------------------------
@@ -216,12 +214,6 @@ class Handler(BaseHTTPRequestHandler):
             if k == name:
                 return v
         return None
-
-    @staticmethod
-    def _max_age(meta: dict) -> int:
-        if not meta.get("expires"):
-            return 30 * 86400
-        return max(60, int((util.parse_time(meta["expires"]) - util.now()).total_seconds()))
 
 
 def make_server(port: int | None = None) -> ThreadingHTTPServer:

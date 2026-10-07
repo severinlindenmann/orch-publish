@@ -17,7 +17,7 @@ orch-apps-web   → 127.0.0.1:8790, serves /s/<id>/ and checks secret links (run
 | Access | Link | The server stores |
 |---|---|---|
 | public | `/s/<id>/` | the files |
-| secret link | `/s/<id>.<token>/` once, then a cookie for `/s/<id>/` | the files and the token's SHA-256 |
+| secret link | `/s/<id>.<token>/` (every file, data files included, under that address) | the files and the token's SHA-256 |
 | sealed | `/s/<id>/#k=<key>` | `sealed.bin` only: `OAS1` · 12-byte nonce · AES-256-GCM ciphertext, additional data `orch-apps:<id>` |
 
 Share documents get `Content-Security-Policy: sandbox …`, so their scripts run in an opaque origin and cannot reach

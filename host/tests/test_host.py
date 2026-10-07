@@ -304,17 +304,21 @@ class ServerTests(HostCase):
         self.assertEqual(self.get("/s/nothere/")[0], 404)
         self.assertEqual(shares.listing()[0]["views"], 1)
 
-    def test_secret_share_token_then_cookie(self):
-        self.upload_share("sec001", {"index.html": b"secret page"})
+    def test_secret_share_lives_under_its_token(self):
+        self.upload_share("sec001", {"index.html": b"secret page", "data.json": b'{"ok":1}'})
         shares.put("sec001", "secret", "INT-0001", "none", util.token_hash(TOKEN))
         self.assertEqual(self.get("/s/sec001/")[0], 404)
+        self.assertEqual(self.get("/s/sec001/data.json")[0], 404)
         self.assertEqual(self.get("/s/sec001.WrongTokenWrongToken/")[0], 404)
-        st, h, _ = self.get(f"/s/sec001.{TOKEN}/")
-        self.assertEqual((st, h["Location"]), (303, "/s/sec001/"))
-        cookie = h["Set-Cookie"].split(";")[0]
-        self.assertIn("Path=/s/sec001/", h["Set-Cookie"])
-        self.assertEqual(self.get("/s/sec001/", cookie)[:3:2], (200, b"secret page"))
-        self.assertEqual(self.get("/s/sec001/", cookie.replace("=", "=0"))[0], 404)
+        st, h, body = self.get(f"/s/sec001.{TOKEN}/")
+        self.assertEqual((st, body), (200, b"secret page"))
+        self.assertNotIn("Set-Cookie", h)
+        self.assertEqual(h["Cache-Control"], "no-store")
+        self.assertEqual(self.get(f"/s/sec001.{TOKEN}/data.json")[:3:2], (200, b'{"ok":1}'))
+        self.assertEqual(self.get(f"/s/sec001.{TOKEN}")[1]["Location"], f"/s/sec001.{TOKEN}/")
+        self.upload_share("pub002", {"index.html": b"x"})
+        shares.put("pub002", "public", "INT-0001", "none")
+        self.assertEqual(self.get(f"/s/pub002.{TOKEN}/")[0], 404, "a token on a public share is not an address")
 
     def test_sealed_share_serves_loader_and_blob_only(self):
         blob = b"OAS1" + b"n" * 12 + b"c" * 40
