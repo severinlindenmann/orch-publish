@@ -98,6 +98,13 @@ def test_cli_failures_become_health(orch_workspace, stderr, health):
     assert snap.health == health and snap.message
 
 
+def test_logs_of_a_deleted_app_are_empty_not_a_failure(orch_workspace):
+    run = FakeRunner([{"argv": ["orch-apps", "logs", "gone-app", "--lines", "20"], "returncode": 2,
+                       "stderr": "refused: no app gone-app"}])
+    snap = LogsProvider().fetch(orch_workspace.provider_context(MANIFEST, runner=run), "gone-app", None)
+    assert snap.health == "ok" and snap.items == ()
+
+
 # -- views ----------------------------------------------------------------------------------------------------------
 
 def card(widgets, title):

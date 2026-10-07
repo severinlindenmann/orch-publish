@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2
+
+- The logs of an app deleted since the last fetch read as empty instead of a failed fetch.
+- A live end-to-end test (ORCH_APPS_LIVE=1) drives every button's code against the real server.
+
 ## 0.1.1
 
 - Ticket card: only live shares and apps, Revoke or Manage in each row, "until" instead of "ends".

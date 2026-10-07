@@ -119,6 +119,8 @@ class LogsProvider:
             return Snapshot(self.id, scope, ctx.now(), health="error", message=e.message)
         if r.returncode != 0:
             first = ((r.stderr or "").strip().splitlines() or ["orch-apps logs failed"])[0]
+            if f"no app {scope}" in first:  # deleted since the last status fetch: nothing to show, not a failure
+                return Snapshot(self.id, scope, ctx.now(), items=())
             return Snapshot(self.id, scope, ctx.now(), health="error", message=first)
         lines = [line for line in r.stdout.splitlines() if line.strip()][-20:]
         items = []

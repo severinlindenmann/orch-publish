@@ -1,7 +1,7 @@
 {
   "name": "orch-apps",
   "title": "Apps",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "requires_api": "2",
   "kind": "in-process",
   "description": "Publish a ticket's web page as a share and run mini apps on your orch-apps host, from Mission Control.",
