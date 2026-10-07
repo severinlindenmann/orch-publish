@@ -69,10 +69,10 @@ class OrchApps:
             did = f"expire|{s['ref']}"
             if did in put_off or not views.soon(s, now):
                 continue
+            opened = f"was opened {s['views']} times" if s.get("views") else "has not been opened yet"
             out.append(PendingDecision(
-                id=did, title=f"{views.share_label(view, s)} ends within a day",
-                body=f"The {s['access']} share of {s.get('ticket')} was opened {s.get('views') or 0} times. "
-                     f"It ends {s['expires']}.",
+                id=did, title=f"{views.share_label(view, s)} ends {views.local_time(s['expires'])}",
+                body=f"This {s['access']} share of {s.get('ticket')} {opened}. Extend it by 7 days, or let it end.",
                 ticket=s.get("ticket"), choices=(("extend", "Extend 7 days"), ("let", "Let it expire")), role="info"))
         return out
 

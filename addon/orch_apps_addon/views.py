@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import urllib.parse
 
-from orch.addons.widgets import KV, Action, Badge, Card, Copy, Link, Search, Table, Tabs, Text, Tile, Time
+from orch.addons.widgets import KV, Action, Badge, Card, Chips, Copy, Link, Search, Table, Tabs, Text, Tile, Time
 
 from . import state
 
@@ -82,12 +82,6 @@ def share_label(view, share: dict) -> str:
     return f"{name} (s/{share['ref']})" if name else f"s/{share['ref']}"
 
 
-def ends(share: dict):
-    if share.get("state") != "live":
-        return share.get("state") or "ended"
-    return Time(share["expires"], "at") if share.get("expires") else "when its ticket is done"
-
-
 # -- Today ----------------------------------------------------------------------------------------------------------
 
 def tile(view) -> list:
@@ -101,35 +95,51 @@ def tile(view) -> list:
 
 # -- ticket card ----------------------------------------------------------------------------------------------------
 
+def local_time(value: str | None) -> str:
+    """08.10. 21:04 in this machine's time zone (for text that cannot hold a Time widget)."""
+    if not value:
+        return ""
+    t = dt.datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone()
+    return t.strftime("%d.%m. %H:%M")
+
+
+def until(share: dict):
+    return Time(share["expires"], "at") if share.get("expires") else "the ticket is done"
+
+
 def ticket_card(view) -> list:
+    """Only what is live: ended shares belong to the Shares tab, not to the ticket."""
     tid = ticket_id(view)
     if not tid:
         return []
     local = state.local(view.state_dir)
     held = [s for s in staged(view) if s.get("ticket") == tid and s.get("published")
             and s["ref"] not in local["revealed"]]
-    shares = [s for s in of_type(view, "share") if s.get("ticket") == tid]
+    shares = [s for s in of_type(view, "share") if s.get("ticket") == tid and s.get("state") == "live"]
     apps = [a for a in of_type(view, "app") if a.get("ticket") == tid]
     if not (held or shares or apps):
         return []
     rows = []
     for a in apps:
         url = app_url(view, a)
-        rows.append((Link(a["slug"], url) if url else a["slug"], Badge(a["role"], a["text"]), "permanent app"))
+        rows.append((Link(f"/{a['slug']}/", url) if url and a.get("text") == "running" else f"/{a['slug']}/",
+                     Badge(a["role"], f"app, {a['text']}"),
+                     Link("Manage", page_link(view, tab="apps", app=a["slug"]))))
     for s in shares:
-        url = share_url(view, s) if s.get("state") == "live" else None
+        url = share_url(view, s)
         label = share_label(view, s)
-        rows.append((Link(label, url) if url else label, Badge(s["role"], f"{s['access']}, {s['state']}"), ends(s)))
-    body = [Table(("Published", "Status", "Ends"), tuple(rows), empty="Nothing published from this ticket yet.")]
-    actions = []
-    for s in held[:1]:
-        actions.append(Action("reveal", "Show link once", s["ref"],
-                              detail=f"{s['label']} ({s['access']}) is published. Its link is shown once."))
-    for s in [s for s in shares if s.get("state") == "live"][: 3 - len(actions)]:
-        actions.append(Action("revoke", f"Revoke s/{s['ref']}", s["ref"], quiet=True))
+        when = f"until {local_time(s['expires'])}" if s.get("expires") else "until the ticket is done"
+        rows.append((Link(label, url) if url else label, f"{s['access']} share, {when}",
+                     Action("revoke", "Revoke", s["ref"], quiet=True, detail=f"{label} stops working at once.")))
+    body = []
     if held:
-        body.insert(0, Text(f"{len(held)} share(s) published from this ticket wait for their link to be shown once."))
-    return [Card("Published", tuple(body + actions))]
+        body.append(Text(f"{held[0]['label']} is published. Its link is shown once; press Show link once and copy it."))
+    body.append(Table(("Published", "Status", "Action"), tuple(rows), key=0,
+                      empty="Nothing live from this ticket. Ended shares are on the Apps page."))
+    for s in held[:1]:
+        body.append(Action("reveal", "Show link once", s["ref"],
+                           detail=f"{s['label']} ({s['access']}) is published. Its link is shown once."))
+    return [Card("Published", tuple(body))]
 
 
 # -- the Apps page --------------------------------------------------------------------------------------------------
@@ -159,12 +169,20 @@ def page(view) -> list:
     return out
 
 
+def app_toggle(a: dict):
+    if a.get("text") == "stopped":
+        return Action("start", "Start", a["slug"], detail=f"/{a['slug']}/ starts answering again.")
+    return Action("stop", "Stop", a["slug"], quiet=True, detail=f"/{a['slug']}/ answers that it is stopped.")
+
+
 def apps_tab(view, apps: list[dict]) -> list:
-    rows = tuple((Link(a["label"], page_link(view, tab="apps", app=a["slug"])), Badge(a["role"], a["text"]),
-                  f"{a.get('stack')} · {a.get('store')}", a.get("ticket") or "",
-                  Time(a["deployed_at"]) if a.get("deployed_at") else "")
-                 for a in apps)
-    out = [Card("Apps", (Table(("App", "Status", "Stack", "Ticket", "Deployed"), rows,
+    rows = []
+    for a in apps:
+        url = app_url(view, a)
+        rows.append((Link(a["label"], page_link(view, tab="apps", app=a["slug"])), Badge(a["role"], a["text"]),
+                     Link(f"/{a['slug']}/", url) if url and a.get("text") == "running" else f"/{a['slug']}/",
+                     a.get("ticket") or "", app_toggle(a)))
+    out = [Card("Apps", (Table(("App", "Status", "Address", "Ticket", "Action"), tuple(rows),
                                empty="No apps yet. Ask an agent for a mini app on a ticket; it builds it with "
                                      "orch-apps and deploys it after your yes."),))]
     chosen = next((a for a in apps if a["slug"] == view.params.get("app")), None)
@@ -173,8 +191,8 @@ def apps_tab(view, apps: list[dict]) -> list:
     if apps:
         typed = (view.params.get("delete") or "").strip()
         target = next((a for a in apps if a["slug"] == typed), None)
-        body = [Text("To delete an app, type its slug. Delete stops the app, removes its address and moves its "
-                     "data to the server's archive."),
+        body = [Text("To delete an app, type its slug and press Search; the Delete button appears. Delete stops "
+                     "the app, removes its address and moves its data to the server's archive."),
                 Search("delete", typed, placeholder="slug of the app to delete")]
         if typed and not target:
             body.append(Text(f"No app is called {typed}."))
@@ -189,11 +207,14 @@ def app_card(view, a: dict) -> Card:
     url = app_url(view, a)
     rows = [("Address", Link(f"/{a['slug']}/", url) if url else f"/{a['slug']}/"),
             ("Access", "secret link" if a.get("access") == "secret" else "public"),
+            ("Stack", f"{a.get('stack')} · {a.get('store')}"),
             ("Version", a.get("version") or "unknown"),
             ("Memory", f"{mb(a['memory_bytes'])} of 128 MB" if a.get("memory_bytes") else "no process"),
             ("Data", human_size(a.get("data_bytes"))),
             ("Deployed", Time(a["deployed_at"]) if a.get("deployed_at") else "unknown")]
     body = [Badge(a["role"], a["text"]), KV(tuple(rows))]
+    if url and a.get("access") != "secret":
+        body.append(Copy("Copy address", url))
     if a.get("message"):
         body.append(Text(a["message"]))
     logs = items(view, "logs", a["slug"])
@@ -212,22 +233,38 @@ def app_card(view, a: dict) -> Card:
 
 
 def shares_tab(view, shares: list[dict]) -> list:
-    order = {"live": 0, "expired": 1, "revoked": 2}
-    shares = sorted(shares, key=lambda s: (order.get(s.get("state"), 3), s.get("expires") or "9999"))
-    rows = tuple((Link(share_label(view, s), page_link(view, tab="shares", share=s["ref"])),
-                  Badge(s["role"], s["access"] if s.get("state") == "live" else f"{s['access']}, {s['state']}"),
-                  s.get("ticket") or "", s.get("views") or 0, ends(s)) for s in shares)
-    out = [Card("Shares", (Table(("Share", "Access", "Ticket", "Views", "Ends"), rows,
-                                 empty="No shares yet. An agent stages one with orch-apps share; you publish it "
-                                       "from the ticket."),))]
+    live = [s for s in shares if s.get("state") == "live"]
+    ended = [s for s in shares if s.get("state") != "live"]
+    show = "ended" if view.params.get("show") == "ended" else "live"
+    chips = Chips((Link(f"Live ({len(live)})", page_link(view, tab="shares"), current=show == "live"),
+                   Link(f"Ended ({len(ended)})", page_link(view, tab="shares", show="ended"), current=show == "ended")),
+                  label="Show", show_label=False)
+    if show == "live":
+        rows = tuple((Link(share_label(view, s), page_link(view, tab="shares", share=s["ref"])),
+                      Badge(s["role"], s["access"]), s.get("ticket") or "", until(s),
+                      Action("revoke", "Revoke", s["ref"], quiet=True,
+                             detail=f"{share_label(view, s)} stops working at once.")) for s in live)
+        table = Table(("Share", "Access", "Ticket", "Until", "Action"), rows,
+                      empty="No live shares. An agent stages one with orch-apps share; you publish it from the ticket.")
+    else:
+        rows = tuple((Link(share_label(view, s), page_link(view, tab="shares", show="ended", share=s["ref"])),
+                      Badge(s["role"], s["access"]), s.get("ticket") or "", s.get("state") or "ended",
+                      Time(s.get("revoked") or s.get("expires"), "at") if (s.get("revoked") or s.get("expires")) else "")
+                     for s in sorted(ended, key=lambda s: s.get("revoked") or s.get("expires") or "", reverse=True))
+        table = Table(("Share", "Access", "Ticket", "Ended", "When"), rows,
+                      empty="No ended shares. The server forgets them 30 days after they end.")
+    out = [Card("Shares", (chips, table))]
     chosen = next((s for s in shares if s["ref"] == view.params.get("share")), None)
     if chosen:
-        url = share_url(view, chosen)
-        address = Link("Open the shared page", url) if url and chosen.get("state") == "live" else (
-            "secret: the link was shown once at publish" if chosen["access"] != "public" else f"/s/{chosen['ref']}/")
+        url = share_url(view, chosen) if chosen.get("state") == "live" else None
+        address = Link("Open the shared page", url) if url else (
+            "secret or sealed: the link was shown once at publish" if chosen["access"] != "public"
+            else "ended, the link no longer works")
         body = [KV((("Address", address), ("Access", chosen["access"]), ("Ticket", chosen.get("ticket") or ""),
                     ("Views", chosen.get("views") or 0), ("Size", human_size(chosen.get("size"))),
-                    ("Ends", ends(chosen))))]
+                    ("Until", until(chosen) if chosen.get("state") == "live" else chosen.get("state") or "ended")))]
+        if url:
+            body.append(Copy("Copy link", url))
         if chosen.get("state") == "live":
             body.append(Action("revoke", "Revoke share", chosen["ref"]))
         out.append(Card(share_label(view, chosen), tuple(body)))
@@ -252,7 +289,13 @@ def server_tab(view, apps: list[dict]) -> list:
 # -- decisions ------------------------------------------------------------------------------------------------------
 
 def soon(share: dict, now: dt.datetime) -> bool:
+    """Ends within a day, and was meant to live longer than a day: a share published for one day is not asked
+    about the moment it is published."""
     if share.get("state") != "live" or not share.get("expires"):
         return False
     end = dt.datetime.fromisoformat(share["expires"].replace("Z", "+00:00"))
+    if share.get("created"):
+        start = dt.datetime.fromisoformat(share["created"].replace("Z", "+00:00"))
+        if end - start <= dt.timedelta(days=1, hours=1):
+            return False
     return now < end <= now + dt.timedelta(days=1)

@@ -100,17 +100,24 @@ def test_cli_failures_become_health(orch_workspace, stderr, health):
 
 # -- views ----------------------------------------------------------------------------------------------------------
 
+def card(widgets, title):
+    return next(w for w in widgets if getattr(w, "title", None) == title)
+
+
 def test_apps_tab_and_app_detail(orch_workspace, loaded):
     widgets = render(orch_workspace, loaded, PAGE, tab="apps", app="dodly")
     t = texts(widgets)
     assert "Dodly" in t and "Kassenbuch" in t and "listening" in t
-    actions = [w for w in walk(widgets) if w.kind == "action"]
-    assert {(a.action, a.target) for a in actions} == {("restart", "dodly"), ("stop", "dodly")}
+    rows = {(a.action, a.target) for a in walk([card(widgets, "Apps")]) if a.kind == "action"}
+    assert rows == {("stop", "dodly"), ("start", "notes"), ("stop", "kassenbuch")}  # one start or stop per row
+    detail = card(widgets, "Dodly")
+    assert {(a.action, a.target) for a in walk([detail]) if a.kind == "action"} == {("restart", "dodly"), ("stop", "dodly")}
+    assert "https://app.severin.io/dodly/" in [getattr(w, "text", "") for w in walk([detail]) if w.kind == "copy"]
 
 
 def test_stopped_app_offers_start(orch_workspace, loaded):
-    actions = [w for w in walk(render(orch_workspace, loaded, PAGE, app="notes")) if w.kind == "action"]
-    assert [(a.action, a.target) for a in actions] == [("start", "notes")]
+    detail = card(render(orch_workspace, loaded, PAGE, app="notes"), "Notes")
+    assert [(a.action, a.target) for a in walk([detail]) if a.kind == "action"] == [("start", "notes")]
 
 
 def test_delete_needs_the_typed_slug(orch_workspace, loaded):
@@ -122,11 +129,15 @@ def test_delete_needs_the_typed_slug(orch_workspace, loaded):
 
 def test_shares_tab_and_server_tab(orch_workspace, loaded):
     widgets = render(orch_workspace, loaded, PAGE, tab="shares", share="pub0000001")
-    actions = [w for w in walk(widgets) if w.kind == "action"]
-    assert [(a.action, a.target) for a in actions] == [("revoke", "pub0000001")]
-    assert "https://app.severin.io/s/pub0000001/" in [getattr(w, "url", "") for w in walk(widgets)]
-    revoked = render(orch_workspace, loaded, PAGE, tab="shares", share="old0000001")
-    assert not [w for w in walk(revoked) if w.kind == "action"]
+    rows = [(a.action, a.target) for a in walk([card(widgets, "Shares")]) if a.kind == "action"]
+    assert sorted(rows) == [("revoke", "pub0000001"), ("revoke", "sea0000001"), ("revoke", "sec0000001")]
+    assert "old0000001" not in texts([card(widgets, "Shares")])  # ended shares sit behind the Ended chip
+    detail = card(widgets, "s/pub0000001")
+    assert [(a.action, a.target) for a in walk([detail]) if a.kind == "action"] == [("revoke", "pub0000001")]
+    assert "https://app.severin.io/s/pub0000001/" in [getattr(w, "text", "") for w in walk([detail]) if w.kind == "copy"]
+    ended = render(orch_workspace, loaded, PAGE, tab="shares", show="ended", share="old0000001")
+    assert "s/old0000001" in texts([card(ended, "Shares")])
+    assert not [w for w in walk(ended) if w.kind == "action"]
     assert "node 24.21.0" in texts(render(orch_workspace, loaded, PAGE, tab="server")) or \
         any("node 24.21.0" in str(r) for w in walk(render(orch_workspace, loaded, PAGE, tab="server")) for r in getattr(w, "rows", ()))
 
@@ -139,8 +150,9 @@ def test_empty_page_before_the_first_fetch(orch_workspace):
 def test_ticket_card(orch_workspace, loaded):
     widgets = render(orch_workspace, loaded, "ticket.external", ticket="INT-0001")
     actions = [(a.action, a.target) for a in walk(widgets) if a.kind == "action"]
-    assert actions[0] == ("reveal", "stg0000002")
-    assert ("revoke", "pub0000001") in actions and len(actions) <= 3
+    assert ("reveal", "stg0000002") in actions
+    assert sorted(a for a in actions if a[0] == "revoke") == [("revoke", "pub0000001"), ("revoke", "sec0000001")]
+    assert "old0000001" not in texts(widgets)  # an ended share is not on the ticket
     assert render(orch_workspace, loaded, "ticket.external", ticket="INT-9999") == []
 
 
@@ -186,12 +198,17 @@ def test_not_now_hides_the_decision_for_a_day(orch_workspace, loaded):
 
 def test_expiry_decision_and_extend(orch_workspace, loaded):
     soon = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=5)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    week_ago = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=6)).replace(microsecond=0).isoformat()
     item = {"id": "share:end0000001", "ref": "end0000001", "label": "s/end0000001", "role": "info", "text": "live",
-            "type": "share", "access": "secret", "ticket": "INT-0001", "expires": soon, "state": "live", "views": 4}
-    orch_workspace.cache(NAME, Snapshot("status", "host", dt.datetime.now(dt.timezone.utc), items=(item,)))
+            "type": "share", "access": "secret", "ticket": "INT-0001", "expires": soon, "state": "live", "views": 4,
+            "created": week_ago}
+    one_day = dict(item, id="share:day0000001", ref="day0000001",
+                   created=(dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=19)).isoformat())
+    orch_workspace.cache(NAME, Snapshot("status", "host", dt.datetime.now(dt.timezone.utc), items=(item, one_day)))
     view = SlotView(orch_workspace.ws, loaded, "today.from_addons")
     [d] = [d for d in loaded.obj.decisions(view) if d.id.startswith("expire|")]
-    assert d.id == "expire|end0000001" and [c[0] for c in d.choices] == ["extend", "let"]
+    assert d.id == "expire|end0000001" and [c[0] for c in d.choices] == ["extend", "let"]  # not the one-day share
+    assert "T" not in d.title.split("ends ")[1] and "opened 4 times" in d.body
     run = runner({"argv": ["orch-apps", "extend", "end0000001", "--expires", "7d", "--json"],
                   "stdout_json": {"id": "end0000001", "expires": "2026-10-14T19:00:00Z"}})
     addon = orch_workspace.load(ADDON, runner=run)

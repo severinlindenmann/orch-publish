@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.1
+
+- Ticket card: only live shares and apps, Revoke or Manage in each row, "until" instead of "ends".
+- Apps tab: address and Start or Stop in each row; Copy address on the app card.
+- Shares tab: Live and Ended filters, Revoke in each row, Copy link for public shares.
+- The ends-soon decision skips shares published for a day or less and shows a readable date.
+
 ## 0.1.0
 
 - First version: ticket card, Today tile, publish and expiry decisions, Apps page with Apps, Shares and Server tabs,
