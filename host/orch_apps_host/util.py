@@ -77,7 +77,7 @@ def configure(paths: Paths) -> None:
 
 # -- validation -------------------------------------------------------------------------------------------------
 
-SLUG = re.compile(r"[a-z][a-z0-9-]{1,30}")
+SLUG = re.compile(r"[a-z][a-z0-9-]{1,28}")  # at most 29, so the app's user oa-<slug> fits 32 characters
 RESERVED = frozenset({"s", "admin", "api", "health", "static", "assets", "_auth"})
 SHARE_ID = re.compile(r"[a-z0-9]{6,16}")
 TOKEN = re.compile(r"[A-Za-z0-9_-]{16,64}")

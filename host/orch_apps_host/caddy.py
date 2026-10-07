@@ -64,6 +64,7 @@ def apply(slug: str, text: str | None) -> None:
             path.unlink(missing_ok=True)
         else:
             path.write_text(before)
-        msg = (res.stderr or res.stdout or "").strip().splitlines()[-3:]
-        raise Failed("Caddy refused the config, nothing applied: " + " | ".join(msg))
+        lines = (res.stderr or res.stdout or "").strip().splitlines()
+        errors = [line for line in lines if line.startswith("Error")] or lines[-1:]
+        raise Failed("Caddy refused the config, nothing applied: " + " | ".join(errors))
     util.run(["systemctl", "reload", "caddy"])

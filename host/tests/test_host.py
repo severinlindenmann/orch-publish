@@ -243,7 +243,7 @@ class AppTests(HostCase):
             self.upload_app("bad-app", files)
             with self.assertRaisesRegex(util.Refused, msg):
                 apps.deploy("bad-app", "INT-0027", "public")
-        for slug in ("admin", "s", "Bad", "a", "x/y"):
+        for slug in ("admin", "s", "Bad", "a", "x/y", "a" * 30):
             with self.assertRaises(util.Refused):
                 apps.deploy(slug, "INT-0027", "public")
 

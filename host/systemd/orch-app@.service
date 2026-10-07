@@ -6,6 +6,8 @@ After=network.target
 [Service]
 Type=simple
 DynamicUser=yes
+# one dynamic user per app; without User= every instance would share the user "orch-app"
+User=oa-%i
 StateDirectory=orch-apps-data/%i
 EnvironmentFile=/srv/orch-apps/apps/%i/env
 ExecStart=/srv/orch-apps/apps/%i/run.sh
