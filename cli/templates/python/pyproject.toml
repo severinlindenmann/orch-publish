@@ -1,0 +1,10 @@
+[project]
+name = "{{slug}}"
+version = "0.1.0"
+requires-python = ">=3.11"
+# Pure-Python wheels only (the host installs with uv --no-build). FastAPI and Jinja2 are fine; packages that need a
+# compiler are not.
+dependencies = []
+
+[tool.uv]
+package = false

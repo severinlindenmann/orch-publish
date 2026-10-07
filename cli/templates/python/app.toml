@@ -1,0 +1,7 @@
+name = "{{name}}"
+about = "{{about}}"
+stack = "python"
+store = "{{store}}"
+start = "python main.py"
+health = "/health"
+test = "python -m unittest discover -s tests"

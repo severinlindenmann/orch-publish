@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{name}}</title>
+<!-- A static app with Markdown pages in content/. Keep every link relative (style.css, not /style.css). -->
+<link rel="stylesheet" href="style.css">
+<main id="page"><p>Loading…</p></main>
+<script>
+// The pages this app shows, in order. Add a file to content/ and its name here.
+const PAGES = ["welcome.md"];
+const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+function render(md) {  // headings, paragraphs, lists, `code`; enough for notes and cheat sheets
+  return md.split(/\n{2,}/).map((block) => {
+    const b = esc(block.trim()).replace(/`([^`]+)`/g, "<code>$1</code>");
+    if (/^#{1,3} /.test(b)) { const n = b.match(/^#+/)[0].length; return `<h${n}>${b.slice(n + 1)}</h${n}>`; }
+    if (/^[-*] /.test(b)) return "<ul>" + b.split("\n").map((l) => `<li>${l.replace(/^[-*] /, "")}</li>`).join("") + "</ul>";
+    return `<p>${b.replace(/\n/g, " ")}</p>`;
+  }).join("\n");
+}
+Promise.all(PAGES.map((p) => fetch(`content/${p}`).then((r) => r.text())))
+  .then((texts) => { document.getElementById("page").innerHTML = texts.map(render).join("<hr>"); })
+  .catch(() => { document.getElementById("page").innerHTML = "<p>The pages could not be loaded.</p>"; });
+</script>
+</html>
