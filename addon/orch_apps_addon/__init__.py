@@ -167,7 +167,8 @@ class OrchApps:
 
     def on_event(self, event, outbox):
         if event.kind == "ticket.moved" and (event.data or {}).get("to") == "done" and event.ticket:
-            outbox.put({"ticket": event.ticket, "at": event.at}, item_id=f"done-{event.ticket}-{event.seq}")
+            # the core box names the item itself (addon, event seq, n), so a replayed event is not queued twice
+            outbox.put({"ticket": event.ticket, "at": event.at})
 
     def drain(self, ctx, items):
         """A ticket is done: its shares that end "7 days after the ticket is done" (no end yet) get that end now."""

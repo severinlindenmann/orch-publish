@@ -291,26 +291,26 @@ def test_actions_recheck_their_target(orch_workspace, loaded):
 
 # -- events ---------------------------------------------------------------------------------------------------------
 
-class Box:
-    def __init__(self):
-        self.items = []
-
-    def put(self, data, *, item_id=None):
-        self.items.append({"id": item_id, "data": data})
-        return item_id
+def core_box(tmp_path, seq):
+    """The outbox exactly as core hands it to on_event (a real Outbox behind core's per-event wrapper)."""
+    from orch.addons.outbox import Outbox, _EventBox
+    box = Outbox(tmp_path / "outbox.jsonl")
+    return box, _EventBox(box, f"{NAME}-{seq}")
 
 
-def test_done_ticket_sets_the_expiry_of_its_open_ended_shares(orch_workspace, loaded):
-    box = Box()
+def test_done_ticket_sets_the_expiry_of_its_open_ended_shares(orch_workspace, loaded, tmp_path):
+    box, seen_by_addon = core_box(tmp_path, 7)
     event = SimpleNamespace(kind="ticket.moved", ticket="INT-0001", data={"from": "testing", "to": "done"},
                             seq=7, at="2026-10-07T19:00:00Z")
-    loaded.obj.on_event(event, box)
-    loaded.obj.on_event(SimpleNamespace(kind="ticket.moved", ticket="INT-0002", data={"to": "testing"}, seq=8, at=""), box)
-    assert [i["data"]["ticket"] for i in box.items] == ["INT-0001"]
+    loaded.obj.on_event(event, seen_by_addon)
+    loaded.obj.on_event(SimpleNamespace(kind="ticket.moved", ticket="INT-0002", data={"to": "testing"}, seq=8, at=""),
+                        core_box(tmp_path, 8)[1])
+    pending = box.pending()
+    assert [i["data"]["ticket"] for i in pending] == ["INT-0001"]
     run = runner({"argv": ["orch-apps", "extend", "sec0000001", "--expires", "*", "--json"],
                   "stdout_json": {"id": "sec0000001"}})
     addon = orch_workspace.load(ADDON, runner=run)
-    assert addon.obj.drain(addon.ctx.provider_context(), box.items) == [box.items[0]["id"]]
+    assert addon.obj.drain(addon.ctx.provider_context(), pending) == [pending[0]["id"]]
     extends = [c for c in run.calls if c[1] == "extend"]
     assert [c[2] for c in extends] == ["sec0000001"]  # pub0000001 already has an end; sea0000001 is another ticket
     end = dt.datetime.fromisoformat(extends[0][4].replace("Z", "+00:00"))

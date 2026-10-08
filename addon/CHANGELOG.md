@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1
+
+- A ticket moving to done gives its open-ended shares their 7-day end again: on_event used an outbox argument core does not take and crashed (0.1.3).
+
 ## 0.2.0
 
 - Apps page: a Needs you card on top (links to show, shares to publish, failed deploys), one card per app with its
