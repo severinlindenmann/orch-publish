@@ -132,10 +132,11 @@ def test_everything_the_buttons_do(orch_workspace, tmp_path):
     step("A ticket moves to done: its open-ended share gets an end 7 days out")
     did = cli("share", str(page), "--ticket", "INT-0031", "--access", "public", "--expires", "done")["id"]
     cli("publish", did)
-    box = []
-    addon.obj.on_event(SimpleNamespace(kind="ticket.moved", ticket="INT-0031", data={"to": "done"}, seq=1,
-                                       at="now"), SimpleNamespace(put=lambda data, item_id=None: box.append(
-                                           {"id": item_id, "data": data}) or item_id))
+    from orch.addons.outbox import Outbox, _EventBox
+    outbox = Outbox(tmp_path / "outbox.jsonl")
+    addon.obj.on_event(SimpleNamespace(kind="ticket.moved", ticket="INT-0031", data={"to": "done"}, seq=1, at="now"),
+                       _EventBox(outbox, f"{NAME}-1"))  # the box core hands to on_event
+    box = outbox.pending()
     assert addon.obj.drain(ctx(), box) == [box[0]["id"]]
     end = dt.datetime.fromisoformat(status_of("shares", did)["expires"].replace("Z", "+00:00"))
     assert dt.timedelta(days=6, hours=23) < end - dt.datetime.now(dt.timezone.utc) <= dt.timedelta(days=7)

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.3
+
+- A ticket moving to done gives its open-ended shares their 7-day end again: on_event used an outbox argument core does not take and crashed.
+
 ## 0.1.2
 
 - The logs of an app deleted since the last fetch read as empty instead of a failed fetch.
