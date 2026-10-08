@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0
+
+- Apps page: a Needs you card on top (links to show, shares to publish, failed deploys), one card per app with its
+  address, Copy address, Restart, Stop or Start and Delete (one confirm; the typed-slug box is gone), an app view with
+  details and its log, and shares grouped by ticket with Copy link or Revoke and Live, Waiting for you and Ended filters.
+- A staged index.html in a folder named like a ticket key is labelled index.html, not as a ticket link.
+
 ## 0.1.2
 
 - The logs of an app deleted since the last fetch read as empty instead of a failed fetch.

@@ -7,6 +7,7 @@ logs    `orch-apps logs <slug>`    every 5 minutes, one scope per app with a pro
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from orch.addons.api import Snapshot
@@ -46,7 +47,10 @@ def share_name(source: str | None) -> str:
     if not source:
         return ""
     p = Path(source)
-    return f"{p.parent.name}/" if p.name == "index.html" and p.parent.name else p.name
+    # a folder named like a ticket key (artifacts/INT-0001/index.html) would read as a ticket link: show the file
+    if p.name == "index.html" and p.parent.name and not re.fullmatch(r"[A-Z][A-Z0-9]*-\d+", p.parent.name):
+        return f"{p.parent.name}/"
+    return p.name
 
 
 class StatusProvider:

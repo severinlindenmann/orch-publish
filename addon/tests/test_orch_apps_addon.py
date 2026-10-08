@@ -111,42 +111,82 @@ def card(widgets, title):
     return next(w for w in widgets if getattr(w, "title", None) == title)
 
 
-def test_apps_tab_and_app_detail(orch_workspace, loaded):
+def actions_in(widget):
+    return [(w.action, w.target) for w in walk([widget]) if w.kind == "action"]
+
+
+def test_needs_you_lists_links_staged_shares_and_failed_apps(orch_workspace, loaded):
+    widgets = render(orch_workspace, loaded, PAGE)
+    needs = card(widgets, "Needs you")
+    assert widgets[0] is needs and needs.role == "warn"  # first on the page
+    t = texts([needs])
+    assert "index.html" in t and "waiting to be published" in t  # stg0000001, not shown as "INT-0001/"
+    assert "report" in t and "link not shown yet" in t  # stg0000002, published and held
+    assert "Kassenbuch" in t and "is serving again" in t  # the failed deploy
+    assert actions_in(needs) == [("reveal", "stg0000002")]
+    assert "/t/INT-0001" in [getattr(w, "url", "") for w in walk([needs])]
+
+
+def test_needs_you_is_absent_when_nothing_waits(orch_workspace):
+    addon = orch_workspace.load(ADDON, runner=runner())
+    ctx = addon.ctx.provider_context()
+    orch_workspace.cache(NAME, StatusProvider().fetch(ctx, "host", None))
+    calm = tuple(i for i in orch_workspace_items(orch_workspace) if i.get("slug") != "kassenbuch")
+    orch_workspace.cache(NAME, Snapshot("status", "host", dt.datetime.now(dt.timezone.utc), items=calm))
+    assert not [w for w in render(orch_workspace, addon, PAGE) if getattr(w, "title", "") == "Needs you"]
+
+
+def orch_workspace_items(orch_workspace):
+    from orch.addons import cache
+    return [i for snap in cache.read_snapshots(orch_workspace.ws, NAME, "status") for i in snap.items]
+
+
+def test_apps_tab_is_one_card_per_app_with_its_actions(orch_workspace, loaded):
+    widgets = render(orch_workspace, loaded, PAGE, tab="apps")
+    grid = card(widgets, "Apps")
+    assert grid.layout == "grid" and [c.title for c in grid.body] == ["Dodly", "Notes", "Kassenbuch"]
+    dodly, notes, kassen = grid.body
+    assert actions_in(dodly) == [("restart", "dodly"), ("stop", "dodly"), ("delete", "dodly")]
+    assert actions_in(notes) == [("start", "notes"), ("delete", "notes")]  # stopped and static: no restart
+    assert "https://app.severin.io/dodly/" in [getattr(w, "text", "") for w in walk([dodly]) if w.kind == "copy"]
+    assert not [w for w in walk([notes]) if w.kind == "copy"]  # a secret app's address is not handed out
+    assert "Search" not in [type(w).__name__ for w in walk(widgets)]  # the typed-slug card is gone
+
+
+def test_app_view_has_details_logs_and_actions(orch_workspace, loaded):
     widgets = render(orch_workspace, loaded, PAGE, tab="apps", app="dodly")
-    t = texts(widgets)
-    assert "Dodly" in t and "Kassenbuch" in t and "listening" in t
-    rows = {(a.action, a.target) for a in walk([card(widgets, "Apps")]) if a.kind == "action"}
-    assert rows == {("stop", "dodly"), ("start", "notes"), ("stop", "kassenbuch")}  # one start or stop per row
     detail = card(widgets, "Dodly")
-    assert {(a.action, a.target) for a in walk([detail]) if a.kind == "action"} == {("restart", "dodly"), ("stop", "dodly")}
-    assert "https://app.severin.io/dodly/" in [getattr(w, "text", "") for w in walk([detail]) if w.kind == "copy"]
+    assert actions_in(detail) == [("restart", "dodly"), ("stop", "dodly"), ("delete", "dodly")]
+    assert "listening" in texts([card(widgets, "Log")])
+    assert "All apps" in texts([detail])
+    assert "A static app has no process" in texts(render(orch_workspace, loaded, PAGE, app="notes"))
 
 
-def test_stopped_app_offers_start(orch_workspace, loaded):
-    detail = card(render(orch_workspace, loaded, PAGE, app="notes"), "Notes")
-    assert [(a.action, a.target) for a in walk([detail]) if a.kind == "action"] == [("start", "notes")]
+def test_shares_tab_groups_by_ticket(orch_workspace, loaded):
+    widgets = render(orch_workspace, loaded, PAGE, tab="shares")
+    titles = [getattr(w, "title", None) for w in widgets]
+    assert "INT-0001" in titles and "INT-0030" in titles
+    int1 = card(widgets, "INT-0001")
+    assert sorted(actions_in(int1)) == [("revoke", "pub0000001"), ("revoke", "sec0000001")]
+    copies = [w.text for w in walk([int1]) if w.kind == "copy"]
+    assert copies == ["https://app.severin.io/s/pub0000001/"]  # only the public share can be copied
+    assert "old0000001" not in texts(widgets)
 
 
-def test_delete_needs_the_typed_slug(orch_workspace, loaded):
-    assert not [w for w in walk(render(orch_workspace, loaded, PAGE)) if getattr(w, "action", "") == "delete"]
-    assert "No app is called dodl" in texts(render(orch_workspace, loaded, PAGE, delete="dodl"))
-    [delete] = [w for w in walk(render(orch_workspace, loaded, PAGE, delete="dodly")) if getattr(w, "action", "") == "delete"]
-    assert delete.target == "dodly"
-
-
-def test_shares_tab_and_server_tab(orch_workspace, loaded):
-    widgets = render(orch_workspace, loaded, PAGE, tab="shares", share="pub0000001")
-    rows = [(a.action, a.target) for a in walk([card(widgets, "Shares")]) if a.kind == "action"]
-    assert sorted(rows) == [("revoke", "pub0000001"), ("revoke", "sea0000001"), ("revoke", "sec0000001")]
-    assert "old0000001" not in texts([card(widgets, "Shares")])  # ended shares sit behind the Ended chip
-    detail = card(widgets, "s/pub0000001")
-    assert [(a.action, a.target) for a in walk([detail]) if a.kind == "action"] == [("revoke", "pub0000001")]
-    assert "https://app.severin.io/s/pub0000001/" in [getattr(w, "text", "") for w in walk([detail]) if w.kind == "copy"]
+def test_shares_waiting_and_ended_views(orch_workspace, loaded):
+    waiting = card(render(orch_workspace, loaded, PAGE, tab="shares", show="waiting"), "Waiting for you")
+    assert actions_in(waiting) == [("reveal", "stg0000002")]
     ended = render(orch_workspace, loaded, PAGE, tab="shares", show="ended", share="old0000001")
-    assert "s/old0000001" in texts([card(ended, "Shares")])
-    assert not [w for w in walk(ended) if w.kind == "action"]
-    assert "node 24.21.0" in texts(render(orch_workspace, loaded, PAGE, tab="server")) or \
-        any("node 24.21.0" in str(r) for w in walk(render(orch_workspace, loaded, PAGE, tab="server")) for r in getattr(w, "rows", ()))
+    assert "s/old0000001" in texts([card(ended, "Ended")])
+    assert not actions_in(card(ended, "Ended")) and not actions_in(card(ended, "s/old0000001"))
+
+
+def test_share_card_and_server_tab(orch_workspace, loaded):
+    widgets = render(orch_workspace, loaded, PAGE, tab="shares", share="pub0000001")
+    detail = card(widgets, "s/pub0000001")
+    assert actions_in(detail) == [("revoke", "pub0000001")]
+    server = render(orch_workspace, loaded, PAGE, tab="server")
+    assert any("node 24.21.0" in str(r) for w in walk(server) for r in getattr(w, "rows", ()))
 
 
 def test_empty_page_before_the_first_fetch(orch_workspace):

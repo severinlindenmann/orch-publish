@@ -123,8 +123,12 @@ def test_everything_the_buttons_do(orch_workspace, tmp_path):
     time.sleep(1)
     assert status_of("apps", slug)["active_since"] != before and http(app_url) == 200
 
-    step("Delete the app; its logs then read as empty, not as a failure")
+    step("Delete the app from its card; its logs then read as empty, not as a failure")
     fetch(orch_workspace, addon)
+    apps_page = addon.obj.widgets(f"page.{NAME}", SlotView(orch_workspace.ws, addon, f"page.{NAME}", params={"tab": "apps"}))
+    grid = next(w for w in apps_page if getattr(w, "title", "") == "Apps")
+    app_card = next(c for c in grid.body if getattr(c, "title", "") == status_of("apps", slug)["name"])
+    assert ("delete", slug) in [(w.action, w.target) for w in app_card.body if getattr(w, "kind", "") == "action"]
     assert "deleted" in addon.obj.act("delete", slug, ctx())
     assert status_of("apps", slug) is None and http(app_url) == 404
     fetch(orch_workspace, addon)  # asserts every provider is healthy, logs of the deleted app included

@@ -1,26 +1,77 @@
 {
   "name": "orch-apps",
   "title": "Apps",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "requires_api": "2",
   "kind": "in-process",
   "description": "Publish a ticket's web page as a share and run mini apps on your orch-apps host, from Mission Control.",
-  "capabilities": ["provider", "page", "panel", "decisions", "settings", "events"],
-  "slots": ["ticket.external", "today.summary"],
-  "binaries": ["orch-apps"],
+  "capabilities": [
+    "provider",
+    "page",
+    "panel",
+    "decisions",
+    "settings",
+    "events"
+  ],
+  "slots": [
+    "ticket.external",
+    "today.summary"
+  ],
+  "binaries": [
+    "orch-apps"
+  ],
   "env": [],
   "entry": "orch_apps_addon:create",
-  "menu": {"title": "Apps", "icon": "box"},
+  "menu": {
+    "title": "Apps",
+    "icon": "box"
+  },
   "settings_schema": [
-    {"key": "host", "label": "Server name to show (the orch-apps CLI's own setup decides where it deploys)", "type": "text", "default": ""},
-    {"key": "domain", "label": "Domain for links (empty: the one orch-apps setup chose)", "type": "text", "default": ""}
+    {
+      "key": "host",
+      "label": "Server name to show (the orch-apps CLI's own setup decides where it deploys)",
+      "type": "text",
+      "default": ""
+    },
+    {
+      "key": "domain",
+      "label": "Domain for links (empty: the one orch-apps setup chose)",
+      "type": "text",
+      "default": ""
+    }
   ],
   "actions": [
-    {"id": "reveal", "label": "Show link once", "confirm": "Show the link now? It is shown once; copy it before you leave the page."},
-    {"id": "revoke", "label": "Revoke share", "confirm": "Revoke this share? Its link stops working at once."},
-    {"id": "start", "label": "Start app", "confirm": "Start this app?", "idempotent": true},
-    {"id": "stop", "label": "Stop app", "confirm": "Stop this app? Its address answers that it is stopped until you start it again."},
-    {"id": "restart", "label": "Restart app", "confirm": "Restart this app?", "idempotent": true},
-    {"id": "delete", "label": "Delete app", "confirm": "Delete this app? It stops, its address goes away and its data moves to the server's archive."}
+    {
+      "id": "reveal",
+      "label": "Show link once",
+      "confirm": "Show the link now? It is shown once; copy it before you leave the page."
+    },
+    {
+      "id": "revoke",
+      "label": "Revoke share",
+      "confirm": "Revoke this share? Its link stops working at once."
+    },
+    {
+      "id": "start",
+      "label": "Start app",
+      "confirm": "Start this app?",
+      "idempotent": true
+    },
+    {
+      "id": "stop",
+      "label": "Stop app",
+      "confirm": "Stop this app? Its address answers that it is stopped until you start it again."
+    },
+    {
+      "id": "restart",
+      "label": "Restart app",
+      "confirm": "Restart this app?",
+      "idempotent": true
+    },
+    {
+      "id": "delete",
+      "label": "Delete app",
+      "confirm": "Delete this app? It stops, its address goes away and its data moves to the server's archive, where it is kept."
+    }
   ]
 }
