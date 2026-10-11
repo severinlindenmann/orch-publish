@@ -10,3 +10,7 @@ sealed) and a mini app as a permanent **app**, both on your own server.
 | `addon/` | The orch-core addon: ticket card, Apps page, Today tile, decisions |
 
 Status: in development (INT-0026). `host/` comes first.
+
+## License
+
+Licensed under the PolyForm Noncommercial License 1.0.0. Commercial use requires a separate license from the author. See [LICENSE](LICENSE).
