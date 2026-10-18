@@ -895,7 +895,14 @@ def test_unbind_and_reregister_with_new_card_between_admission_and_body_refuses(
         env.sql(
             "INSERT INTO workspaces(workspace_id, wsk_pub, owner_person_id, owner_pk, card_seq,"
             " card_json, created_ms, updated_ms) VALUES (?,?,?,?,?,?,?,?)",
-            (WS_A, "another-key", PERSON, PK_B64, 1, "{}", NOW, NOW),
+            WS_A,
+            "another-key",
+            PERSON,
+            PK_B64,
+            1,
+            "{}",
+            NOW,
+            NOW,
         )
 
     reached, status, _ = _unbind_during_body(env, swap)
