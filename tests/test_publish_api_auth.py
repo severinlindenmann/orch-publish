@@ -954,3 +954,18 @@ def test_unbind_keeps_nonces_so_a_replay_after_reregister_is_refused(env):
     cli.main(["admin", "--data", env.data, "ws", "allow", WS_A, PERSON])
     assert env.register().status_code == 200
     assert err(env.status(headers=hdr)) == "replay"
+
+
+def test_status_row_vanishing_after_the_middleware_is_401_not_500(env, monkeypatch):
+    from pubsrv import registry
+
+    real = registry.get_workspace
+    calls = []
+
+    def vanishing(conn, ws):
+        calls.append(ws)
+        return real(conn, ws) if len(calls) == 1 else None  # middleware sees it, handler does not
+
+    monkeypatch.setattr(registry, "get_workspace", vanishing)
+    r = env.status()
+    assert (r.status_code, err(r)) == (401, "unknown_workspace")

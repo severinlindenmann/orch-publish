@@ -107,9 +107,10 @@ def serve(args):
 
     from .app import create_app
 
-    host, _, port = args.bind.rpartition(":")
-    if host not in LOOPBACK or not port.isdigit():
-        print("serve binds loopback only: --bind must be 127.0.0.1:PORT", file=sys.stderr)
+    try:
+        host, port = _loopback_port(args.bind, "--bind")
+    except ValueError as e:
+        print(e, file=sys.stderr)
         return 2
     # --api-host is what clients sign (it may be a public name when a proxy sits in front); it
     # defaults to the bind address
@@ -117,11 +118,105 @@ def serve(args):
     # no access log: request lines carry ids, and the no-logging policy applies (design I15)
     uvicorn.run(
         app,
-        host="127.0.0.1" if host == "localhost" else host.strip("[]"),
-        port=int(port),
+        host=host,
+        port=port,
         access_log=False,
         log_level="warning",
     )
+    return 0
+
+
+def _loopback_port(value, what):
+    host, _, port = value.rpartition(":")
+    if host not in LOOPBACK or not port.isdigit():
+        raise ValueError(f"{what} must be 127.0.0.1:PORT (loopback only)")
+    return ("127.0.0.1" if host == "localhost" else host.strip("[]")), int(port)
+
+
+def _uvicorn_server(app, host, port):
+    import uvicorn
+
+    class Quiet(uvicorn.Server):
+        def install_signal_handlers(self):  # the main thread owns Ctrl-C
+            pass
+
+    # no access log: request lines carry ids, and the no-logging policy applies (design I15)
+    return Quiet(
+        uvicorn.Config(
+            app,
+            host=host,
+            port=port,
+            access_log=False,
+            log_level="warning",
+            server_header=False,
+            workers=1,
+        )
+    )
+
+
+def share(args):
+    from .serve import create_share_app
+
+    try:
+        host, port = _loopback_port(args.share_host, "--share-host")
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 2
+    _uvicorn_server(create_share_app(args.data), host, port).run()
+    return 0
+
+
+def dev(args, ready=None):
+    """Both processes' servers on loopback, plain HTTP, for local testing (design section 4)."""
+    import threading
+
+    from .app import create_app
+    from .serve import create_share_app
+
+    try:
+        a_host, a_port = _loopback_port(args.api, "--api")
+        s_host, s_port = _loopback_port(args.share, "--share")
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 2
+    if (a_host, a_port) == (s_host, s_port):
+        print("--api and --share need different ports (separate origins)", file=sys.stderr)
+        return 2
+    pre = []
+    for item in args.workspace or []:
+        ws, _, person = item.partition("=")
+        if not (_ID.fullmatch(ws) and _ID.fullmatch(person)):
+            print("--workspace must be WS=PERSON (32 lower-case hex each)", file=sys.stderr)
+            return 2
+        pre.append((ws, person))
+    path = db.prepare_dir(args.data)
+    db.init(path)
+    conn = db.connect(path)
+    try:
+        for ws, person in pre:
+            conn.execute(
+                "INSERT OR REPLACE INTO prebinds(workspace_id, person_id, added_ms) VALUES (?,?,?)",
+                (ws, person, _now()),
+            )
+        for person in args.owner or []:
+            conn.execute(
+                "INSERT OR IGNORE INTO owners(person_id, added_ms) VALUES (?,?)",
+                (person, _now()),
+            )
+    finally:
+        conn.close()
+    api = _uvicorn_server(create_app(args.data, args.api), a_host, a_port)
+    web = _uvicorn_server(create_share_app(args.data), s_host, s_port)
+    t = threading.Thread(target=web.run, daemon=True)
+    t.start()
+    print(f"orch-publish dev: api http://{args.api}  share http://{args.share}", flush=True)
+    try:
+        api.run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        web.should_exit = True
+        t.join(timeout=5)
     return 0
 
 
@@ -132,6 +227,20 @@ def main(argv=None):
     s.add_argument("--data", required=True)
     s.add_argument("--bind", default="127.0.0.1:8103", help="loopback host:port to listen on")
     s.add_argument("--api-host", default=None, help="host[:port] clients sign (default: --bind)")
+    w2 = sub.add_parser("share", help="run the share server (public origin) on loopback")
+    w2.add_argument("--data", required=True)
+    w2.add_argument("--share-host", default="127.0.0.1:8104")
+    d = sub.add_parser("dev", help="run API and share server on loopback for local testing")
+    d.add_argument("--data", required=True)
+    d.add_argument("--api", default="127.0.0.1:8103")
+    d.add_argument("--share", default="127.0.0.1:8104")
+    d.add_argument("--owner", action="append", type=_id, help="person id to allow (repeatable)")
+    d.add_argument(
+        "--workspace",
+        action="append",
+        metavar="WS=PERSON",
+        help="pre-bind a workspace id to an owner (repeatable; same as admin ws allow)",
+    )
     a = sub.add_parser("admin", help="owner allowlist and blocking")
     a.add_argument("--data", required=True)
     g = a.add_subparsers(dest="group", required=True)
@@ -150,7 +259,8 @@ def main(argv=None):
         "id", type=_id
     )
     args = p.parse_args(argv)
-    return serve(args) if args.cmd == "serve" else admin(args)
+    run = {"serve": serve, "share": share, "dev": dev}.get(args.cmd, admin)
+    return run(args)
 
 
 if __name__ == "__main__":

@@ -214,6 +214,8 @@ def create_app(data_dir, api_host, clock=None):
             row = registry.get_workspace(conn, ws)
         finally:
             conn.close()
+        if row is None:  # unbound between the middleware and this handler
+            return JSONResponse({"error": "unknown_workspace"}, 401, _HEADERS)
         return JSONResponse(
             {"workspace": ws, "card_seq": row["card_seq"], "status": row["status"]}, 200, _HEADERS
         )
