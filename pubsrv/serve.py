@@ -110,7 +110,9 @@ _PAGE = (
     '<!doctype html><html lang="en"><meta charset="utf-8">'
     '<meta name="viewport" content="width=device-width,initial-scale=1">'
     '<meta name="referrer" content="no-referrer"><meta name="robots" content="noindex,nofollow">'
-    "<title>@TITLE@</title><style>" + _STYLE + '</style><main><p class="w">Shared with orch</p>@BODY@</main></html>'
+    "<title>@TITLE@</title><style>"
+    + _STYLE
+    + '</style><main><p class="w">Shared with orch</p>@BODY@</main></html>'
 )
 _LANDING_BODY = (
     "<h1>Files were shared with you</h1>"
@@ -127,10 +129,13 @@ _LANDING_BODY = (
 ASK = " Ask the person who sent it for a new link."
 NOT_FOUND = ("Not found", "Nothing is shared at this address.")
 GONE = {
-    "opened": ("Already opened", "This link was already opened and cannot be used again."+ASK),
-    "expired": ("Expired", "This link has expired."+ASK),
-    "removed": ("Removed", "This link was removed by the person who shared it."+ASK),
-    "view": ("Ended", "This viewing session has ended. Use your link again if it still works."+ASK),
+    "opened": ("Already opened", "This link was already opened and cannot be used again." + ASK),
+    "expired": ("Expired", "This link has expired." + ASK),
+    "removed": ("Removed", "This link was removed by the person who shared it." + ASK),
+    "view": (
+        "Ended",
+        "This viewing session has ended. Use your link again if it still works." + ASK,
+    ),
 }
 TOO_MANY = ("Slow down", "Too many attempts. Wait a minute and try again.")
 
