@@ -32,6 +32,8 @@ VIEW_MS = 30 * 60 * 1000
 OPEN_LIMIT_PER_MIN = 30  # I14, per share, counted for requests that carry the right token
 MAX_POST = 2048
 CHUNK = 64 * 1024
+IP_BURST = 120  # L1: per-IP token bucket for landing GETs and opens, wrong tokens included
+IP_REFILL_PER_S = 5
 MAX_FILE = 60 * 1024 * 1024
 _ROUTE_SHARE = re.compile(rf"/s/({ID32})")
 _ROUTE_OPEN = re.compile(rf"/s/({ID32})/open")
@@ -82,7 +84,7 @@ _STYLE = (
 _SCRIPT = (
     "var m=/[#&]t=([A-Za-z0-9_-]+)/.exec(location.hash);"
     "var f=document.getElementById('f');"
-    "if(m){f.t.value=m[1];f.hidden=false;"
+    "if(m){f.t.value=m[1];f.hidden=false;history.replaceState(null,'',location.pathname);"
     "f.onsubmit=function(){f.querySelector('button').disabled=true}}"
     "else{document.getElementById('x').hidden=false}"
 )
@@ -112,8 +114,8 @@ _LANDING_BODY = (
     '<input type="hidden" name="t" value="">'
     "<p>Nothing has been opened yet. Opening may use up one of the views this link allows.</p>"
     '<button type="submit">Open</button></form>'
-    '<p id="x" hidden>This address is incomplete. Use the whole link you were given, '
-    "including the part after the # sign.</p>"
+    '<p id="x" hidden>This address is incomplete. Open the original link again, using the whole link '
+    "you were given, including the part after the # sign.</p>"
     f"<script>{_SCRIPT}</script>"
 )
 NOT_FOUND = ("Not found", "Nothing is shared at this address.")
@@ -219,6 +221,7 @@ class ShareServer:
         self.clock = clock or _now
         self._opens = {}  # share_id -> deque of recent open times (ms); per process
         self._lock = threading.Lock()
+        self._ips = {}  # ip -> (tokens, last monotonic time)
         db.init(self.db_path)
 
     # -- ASGI -----------------------------------------------------------------------------------
@@ -242,6 +245,22 @@ class ShareServer:
             resp = page(500, ("Error", "Something went wrong."))
         await resp.send(send, head=method == "HEAD")
 
+    def _ip_ok(self, scope):
+        """Cheap bucket before any DB work. Behind a proxy this is the proxy's address, so the
+        real per-IP limit then belongs to Caddy as well (documented)."""
+        ip = (scope.get("client") or ("?", 0))[0]
+        now = time.monotonic()
+        with self._lock:
+            tokens, last = self._ips.get(ip, (IP_BURST, now))
+            tokens = min(IP_BURST, tokens + (now - last) * IP_REFILL_PER_S)
+            if len(self._ips) > 10_000:
+                self._ips = {k: v for k, v in self._ips.items() if v[0] < IP_BURST}
+            if tokens < 1:
+                self._ips[ip] = (tokens, now)
+                return False
+            self._ips[ip] = (tokens - 1, now)
+            return True
+
     async def _route(self, scope, receive, method):
         # The raw path is matched as is. Percent-escapes survive into the view-file path, where
         # they are decoded once and checked (I8); the share id and view id are strict hex.
@@ -256,6 +275,8 @@ class ShareServer:
                 extra={"allow": "GET, HEAD, POST"},
             )
         m = _ROUTE_OPEN.fullmatch(path)
+        if (m or _ROUTE_SHARE.fullmatch(path)) and not self._ip_ok(scope):
+            return page(429, TOO_MANY, extra={"retry-after": "60"})
         if m:
             if method != "POST":
                 return page(

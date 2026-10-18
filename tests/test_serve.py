@@ -323,3 +323,18 @@ def test_landing_script_disables_the_button_after_submit(env):
 def test_short_tokens_are_refused_before_any_lookup(env):
     env.share({"index.html": b"x"}, token="s" * 20)  # a host that made a short token
     assert env.open(token="s" * 20).status_code == 404
+
+
+def test_per_ip_bucket_limits_landing_and_open_including_wrong_tokens(env):
+    env.share({"index.html": b"x"}, kind="secret", limit=0)
+    codes = [env.c.get(f"/s/{SID}").status_code for _ in range(130)]
+    assert codes[:100].count(200) == 100 and 429 in codes
+    r = env.open(token="w" * 43)
+    assert r.status_code == 429 and env.row()["views"] == 0
+    check_headers(r)
+
+
+def test_script_clears_fragment_and_incomplete_hint(env):
+    env.share({"index.html": b"x"})
+    page = env.c.get(f"/s/{SID}").text
+    assert "history.replaceState" in page and "Open the original link again" in page
