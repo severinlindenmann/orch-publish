@@ -147,7 +147,7 @@ def test_revoke_and_expiry_bite_inside_a_view_session(env):
 
 def test_view_session_lasts_30_minutes_and_is_bound_to_its_share(env):
     env.share({"index.html": b"x"}, kind="secret", limit=0)
-    env.share({"index.html": b"y"}, sid="d" * 32, token="Q" * 30, kind="secret", limit=0)
+    env.share({"index.html": b"y"}, sid="d" * 32, token="Q" * 43, kind="secret", limit=0)
     loc = env.view_url()
     other = loc.replace(SID, "d" * 32, 1)
     assert env.c.get(other).status_code == 404  # view id belongs to another share
@@ -270,7 +270,7 @@ def test_open_rate_limit_per_share(env):
     env.now += 61_000
     assert env.open().status_code == 303
     # wrong tokens never use up the allowance
-    assert env.open(token="y" * 40).status_code == 404
+    assert env.open(token="y" * 43).status_code == 404
 
 
 def test_no_logs_carry_the_token(env, caplog, capfd):
@@ -280,10 +280,10 @@ def test_no_logs_carry_the_token(env, caplog, capfd):
     loc = env.view_url()
     env.c.get(loc)
     env.open()
-    env.open(token="N" * 40)
+    env.open(token="N" * 43)
     out, err = capfd.readouterr()
     assert TOKEN not in caplog.text + out + err
-    assert ("N" * 40) not in caplog.text + out + err
+    assert ("N" * 43) not in caplog.text + out + err
 
 
 def test_internal_error_fails_closed(env, monkeypatch):
@@ -302,3 +302,24 @@ def test_dev_runner_validation(capsys, tmp_path):
         cli.main(["dev", "--data", d, "--api", "127.0.0.1:8103", "--share", "127.0.0.1:8103"]) == 2
     )
     assert cli.main(["share", "--data", d, "--share-host", "8.8.8.8:80"]) == 2
+
+
+def test_large_file_is_streamed_whole_and_head_sends_no_body(env):
+    data = bytes(range(256)) * 2000  # 512000 bytes, several chunks
+    env.share({"big.bin": data, "index.html": b"x"}, kind="secret", limit=0)
+    base = env.view_url()
+    r = env.c.get(base + "big.bin")
+    assert r.content == data and r.headers["content-length"] == str(len(data))
+    h = env.c.head(base + "big.bin")
+    assert h.content == b"" and h.headers["content-length"] == str(len(data))
+
+
+def test_landing_script_disables_the_button_after_submit(env):
+    env.share({"index.html": b"x"})
+    page = env.c.get(f"/s/{SID}").text
+    assert "disabled=true" in page
+
+
+def test_short_tokens_are_refused_before_any_lookup(env):
+    env.share({"index.html": b"x"}, token="s" * 20)  # a host that made a short token
+    assert env.open(token="s" * 20).status_code == 404

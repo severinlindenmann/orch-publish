@@ -10,7 +10,7 @@ from pubsrv import db
 from pubsrv.serve import create_share_app, token_hash
 
 SID = "a" * 32
-TOKEN = "T0kenForTestsOnly_0123456789abcdefghijklmnopq"
+TOKEN = "T0kenForTestsOnly_0123456789abcdefghijklmnopq"[:43]
 NOW = 1_790_000_000_000
 
 

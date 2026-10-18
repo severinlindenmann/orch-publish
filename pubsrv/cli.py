@@ -104,7 +104,11 @@ def _uvicorn_server(app, host, port):
             pass
 
     # no access log: request lines carry ids, and the no-logging policy applies (design I15)
-    return Quiet(uvicorn.Config(app, host=host, port=port, access_log=False, log_level="warning"))
+    return Quiet(
+        uvicorn.Config(
+            app, host=host, port=port, access_log=False, log_level="warning", server_header=False
+        )
+    )
 
 
 def share(args):

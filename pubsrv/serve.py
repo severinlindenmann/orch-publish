@@ -17,6 +17,8 @@ import os
 import re
 import secrets
 import sqlite3
+import stat
+import threading
 import time
 import unicodedata
 from collections import deque
@@ -25,10 +27,12 @@ from urllib.parse import parse_qs, quote
 from . import db
 
 ID32 = r"[0-9a-f]{32}"
-TOKEN = re.compile(r"[A-Za-z0-9_-]{16,64}")
+TOKEN = re.compile(r"[A-Za-z0-9_-]{43}")  # base64url of the host's 32 random bytes
 VIEW_MS = 30 * 60 * 1000
 OPEN_LIMIT_PER_MIN = 30  # I14, per share, counted for requests that carry the right token
 MAX_POST = 2048
+CHUNK = 64 * 1024
+MAX_FILE = 60 * 1024 * 1024
 _ROUTE_SHARE = re.compile(rf"/s/({ID32})")
 _ROUTE_OPEN = re.compile(rf"/s/({ID32})/open")
 _ROUTE_VIEW = re.compile(rf"/s/({ID32})/v/({ID32})/(.*)", re.DOTALL)
@@ -78,7 +82,8 @@ _STYLE = (
 _SCRIPT = (
     "var m=/[#&]t=([A-Za-z0-9_-]+)/.exec(location.hash);"
     "var f=document.getElementById('f');"
-    "if(m){f.t.value=m[1];f.hidden=false}"
+    "if(m){f.t.value=m[1];f.hidden=false;"
+    "f.onsubmit=function(){f.querySelector('button').disabled=true}}"
     "else{document.getElementById('x').hidden=false}"
 )
 
@@ -137,15 +142,23 @@ class _Resp:
     """Builds every response; the security headers live here and nowhere else."""
 
     def __init__(
-        self, status, body=b"", ctype="text/html; charset=utf-8", csp=PAGE_CSP, extra=None
+        self,
+        status,
+        body=b"",
+        ctype="text/html; charset=utf-8",
+        csp=PAGE_CSP,
+        extra=None,
+        fd=None,
+        size=0,
     ):
         self.status, self.body, self.ctype, self.csp = status, body, ctype, csp
         self.extra = extra or {}
+        self.fd, self.size = fd, size  # a file is streamed from this fd, never held in memory
 
     def headers(self, head):
         h = {
             "content-type": self.ctype,
-            "content-length": str(len(self.body)),
+            "content-length": str(self.size if self.fd is not None else len(self.body)),
             "content-security-policy": self.csp,
             "x-content-type-options": "nosniff",
             "referrer-policy": "no-referrer",
@@ -158,10 +171,30 @@ class _Resp:
         return [(k.encode(), v.encode("latin-1")) for k, v in h.items()]
 
     async def send(self, send, head=False):
-        await send(
-            {"type": "http.response.start", "status": self.status, "headers": self.headers(head)}
-        )
-        await send({"type": "http.response.body", "body": b"" if head else self.body})
+        try:
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": self.status,
+                    "headers": self.headers(head),
+                }
+            )
+            if self.fd is None:
+                return await send(
+                    {"type": "http.response.body", "body": b"" if head else self.body}
+                )
+            left = 0 if head else self.size
+            while True:
+                chunk = await asyncio.to_thread(os.read, self.fd, min(left, CHUNK)) if left else b""
+                left -= len(chunk)
+                more = bool(chunk) and left > 0
+                await send({"type": "http.response.body", "body": chunk, "more_body": more})
+                if not more:
+                    return
+        finally:
+            if self.fd is not None:
+                os.close(self.fd)
+                self.fd = None
 
 
 def page(status, title_text, body=None, csp=PAGE_CSP, extra=None):
@@ -184,7 +217,8 @@ class ShareServer:
         self.db_path = db.prepare_dir(data_dir)
         self.shares_dir = os.path.realpath(os.path.join(data_dir, "shares"))
         self.clock = clock or _now
-        self._opens = {}  # share_id -> deque of recent open times (ms)
+        self._opens = {}  # share_id -> deque of recent open times (ms); per process
+        self._lock = threading.Lock()
         db.init(self.db_path)
 
     # -- ASGI -----------------------------------------------------------------------------------
@@ -289,15 +323,16 @@ class ShareServer:
         return page(200, ("Open shared files", ""), body=body, csp=LANDING_CSP)
 
     def _rate_ok(self, share_id, now):
-        q = self._opens.setdefault(share_id, deque())
-        while q and q[0] <= now - 60_000:
-            q.popleft()
-        if len(q) >= OPEN_LIMIT_PER_MIN:
-            return False
-        q.append(now)
-        if len(self._opens) > 10_000:
-            self._opens = {share_id: q}
-        return True
+        with self._lock:
+            q = self._opens.setdefault(share_id, deque())
+            while q and q[0] <= now - 60_000:
+                q.popleft()
+            if len(q) >= OPEN_LIMIT_PER_MIN:
+                return False
+            q.append(now)
+            if len(self._opens) > 10_000:  # drop only idle windows
+                self._opens = {k: v for k, v in self._opens.items() if v and v[-1] > now - 60_000}
+            return True
 
     def _open(self, share_id, raw):
         try:
@@ -390,18 +425,10 @@ class ShareServer:
             fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
         except OSError:
             return not_found()
-        try:
-            st = os.fstat(fd)
-            if not os.path.isfile(path) or st.st_size > 60 * 1024 * 1024:
-                return not_found()
-            data = os.read(fd, st.st_size) if st.st_size else b""
-            while len(data) < st.st_size:
-                more = os.read(fd, st.st_size - len(data))
-                if not more:
-                    break
-                data += more
-        finally:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_FILE:
             os.close(fd)
+            return not_found()
         ext = os.path.splitext(rel)[1].lower()
         extra = {"access-control-allow-origin": "*"}
         if ext in INLINE_TYPES:
@@ -412,7 +439,7 @@ class ShareServer:
             extra["content-disposition"] = (
                 f"attachment; filename=\"{safe_name(name)}\"; filename*=UTF-8''{quote(name)}"
             )
-        return _Resp(200, data, ctype, csp=FILE_CSP, extra=extra)
+        return _Resp(200, b"", ctype, csp=FILE_CSP, extra=extra, fd=fd, size=st.st_size)
 
     @staticmethod
     def _clean(rest):
