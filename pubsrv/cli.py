@@ -89,12 +89,102 @@ def serve(args):
     return 0
 
 
+def _loopback_port(value, what):
+    host, _, port = value.rpartition(":")
+    if host not in LOOPBACK or not port.isdigit():
+        raise ValueError(f"{what} must be 127.0.0.1:PORT (loopback only)")
+    return ("127.0.0.1" if host == "localhost" else host.strip("[]")), int(port)
+
+
+def _uvicorn_server(app, host, port):
+    import uvicorn
+
+    class Quiet(uvicorn.Server):
+        def install_signal_handlers(self):  # the main thread owns Ctrl-C
+            pass
+
+    # no access log: request lines carry ids, and the no-logging policy applies (design I15)
+    return Quiet(
+        uvicorn.Config(
+            app,
+            host=host,
+            port=port,
+            access_log=False,
+            log_level="warning",
+            server_header=False,
+            workers=1,
+        )
+    )
+
+
+def share(args):
+    from .serve import create_share_app
+
+    try:
+        host, port = _loopback_port(args.share_host, "--share-host")
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 2
+    _uvicorn_server(create_share_app(args.data), host, port).run()
+    return 0
+
+
+def dev(args, ready=None):
+    """Both processes' servers on loopback, plain HTTP, for local testing (design section 4)."""
+    import threading
+
+    from .app import create_app
+    from .serve import create_share_app
+
+    try:
+        a_host, a_port = _loopback_port(args.api, "--api")
+        s_host, s_port = _loopback_port(args.share, "--share")
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 2
+    if (a_host, a_port) == (s_host, s_port):
+        print("--api and --share need different ports (separate origins)", file=sys.stderr)
+        return 2
+    path = db.prepare_dir(args.data)
+    db.init(path)
+    conn = db.connect(path)
+    try:
+        for person in args.owner or []:
+            conn.execute(
+                "INSERT OR IGNORE INTO owners(person_id, added_ms) VALUES (?,?)",
+                (person, _now()),
+            )
+    finally:
+        conn.close()
+    api = _uvicorn_server(create_app(args.data, args.api), a_host, a_port)
+    web = _uvicorn_server(create_share_app(args.data), s_host, s_port)
+    t = threading.Thread(target=web.run, daemon=True)
+    t.start()
+    print(f"orch-publish dev: api http://{args.api}  share http://{args.share}", flush=True)
+    try:
+        api.run()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        web.should_exit = True
+        t.join(timeout=5)
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="orch-publish")
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("serve", help="run the API on loopback")
     s.add_argument("--data", required=True)
     s.add_argument("--api-host", default="127.0.0.1:8103", help="host:port clients sign and reach")
+    w2 = sub.add_parser("share", help="run the share server (public origin) on loopback")
+    w2.add_argument("--data", required=True)
+    w2.add_argument("--share-host", default="127.0.0.1:8104")
+    d = sub.add_parser("dev", help="run API and share server on loopback for local testing")
+    d.add_argument("--data", required=True)
+    d.add_argument("--api", default="127.0.0.1:8103")
+    d.add_argument("--share", default="127.0.0.1:8104")
+    d.add_argument("--owner", action="append", type=_id, help="person id to allow (repeatable)")
     a = sub.add_parser("admin", help="owner allowlist and blocking")
     a.add_argument("--data", required=True)
     g = a.add_subparsers(dest="group", required=True)
@@ -107,7 +197,8 @@ def main(argv=None):
         w.add_parser(name).add_argument("id", type=_id)
     w.add_parser("list")
     args = p.parse_args(argv)
-    return serve(args) if args.cmd == "serve" else admin(args)
+    run = {"serve": serve, "share": share, "dev": dev}.get(args.cmd, admin)
+    return run(args)
 
 
 if __name__ == "__main__":
