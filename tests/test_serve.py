@@ -338,3 +338,18 @@ def test_script_clears_fragment_and_incomplete_hint(env):
     env.share({"index.html": b"x"})
     page = env.c.get(f"/s/{SID}").text
     assert "history.replaceState" in page and "Open the original link again" in page
+
+
+def test_landing_polish_wording_and_no_metadata(env):
+    env.share({"secret-name.txt": b"x"})
+    r = env.c.get(f"/s/{SID}")
+    assert "Open shared files" in r.text and "Shared with orch" in r.text
+    assert "may count as one view" in r.text
+    assert "secret-name" not in r.text
+
+
+def test_gone_pages_tell_what_to_do(env):
+    from pubsrv import serve
+
+    for kind in ("opened", "expired", "removed"):
+        assert "Ask the person who sent it for a new link." in serve.gone(kind).body.decode()

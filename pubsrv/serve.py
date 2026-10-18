@@ -75,11 +75,15 @@ ATTACHMENT_TYPES = {
 FILE_CSP = "sandbox allow-scripts allow-forms allow-popups allow-downloads; frame-ancestors 'none'"
 
 _STYLE = (
-    "body{font:16px/1.5 system-ui,sans-serif;max-width:32rem;margin:12vh auto;padding:0 20px;"
-    "color:#1d1d1f}button{font:inherit;padding:.6em 1.4em;border:0;border-radius:8px;"
-    "background:#1d1d1f;color:#fff;cursor:pointer}h1{font-size:1.4rem}p.s{color:#6e6e73}"
-    "li{margin:.2em 0}@media(prefers-color-scheme:dark){body{background:#111;color:#f5f5f7}"
-    "button{background:#f5f5f7;color:#111}p.s{color:#a1a1a6}}"
+    "body{font:16px/1.5 system-ui,-apple-system,sans-serif;max-width:30rem;margin:8vh auto;padding:0 20px;"
+    "color:#1d1d1f;background:#f5f5f7}main{display:block;background:#fff;border:1px solid #d2d2d7;"
+    "border-radius:14px;padding:24px}.w{font-size:.8rem;font-weight:600;letter-spacing:.04em;"
+    "color:#6e6e73;margin:0 0 16px}"
+    "button{font:inherit;font-weight:600;padding:.7em 1.4em;border:0;border-radius:8px;min-height:44px;"
+    "background:#0f766e;color:#fff;cursor:pointer}button:disabled{opacity:.6}h1{font-size:1.35rem;margin:0 0 .5em}"
+    "p.s{color:#6e6e73;font-size:.9rem}li{margin:.2em 0}a{color:#0f766e}"
+    "@media(prefers-color-scheme:dark){body{background:#111;color:#f5f5f7}main{background:#1c1c1e;"
+    "border-color:#3a3a3c}.w,p.s{color:#a1a1a6}button{background:#2dd4bf;color:#04201d}a{color:#2dd4bf}}"
 )
 _SCRIPT = (
     "var m=/[#&]t=([A-Za-z0-9_-]+)/.exec(location.hash);"
@@ -106,24 +110,32 @@ _PAGE = (
     '<!doctype html><html lang="en"><meta charset="utf-8">'
     '<meta name="viewport" content="width=device-width,initial-scale=1">'
     '<meta name="referrer" content="no-referrer"><meta name="robots" content="noindex,nofollow">'
-    "<title>@TITLE@</title><style>" + _STYLE + "</style>@BODY@</html>"
+    "<title>@TITLE@</title><style>"
+    + _STYLE
+    + '</style><main><p class="w">Shared with orch</p>@BODY@</main></html>'
 )
 _LANDING_BODY = (
-    "<h1>Someone shared files with you</h1>"
+    "<h1>Files were shared with you</h1>"
     '<form id="f" method="post" action="@ACTION@" hidden>'
     '<input type="hidden" name="t" value="">'
-    "<p>Nothing has been opened yet. Opening may use up one of the views this link allows.</p>"
-    '<button type="submit">Open</button></form>'
+    "<p>Nothing has been opened yet.</p>"
+    '<button type="submit">Open shared files</button>'
+    '<p class="s">Opening these files may count as one view. If this link allows only one view, '
+    "you may not be able to reopen it.</p></form>"
     '<p id="x" hidden>This address is incomplete. Open the original link again, using the whole link '
     "you were given, including the part after the # sign.</p>"
     f"<script>{_SCRIPT}</script>"
 )
+ASK = " Ask the person who sent it for a new link."
 NOT_FOUND = ("Not found", "Nothing is shared at this address.")
 GONE = {
-    "opened": ("Already opened", "This link was already opened and cannot be used again."),
-    "expired": ("Expired", "This link has expired."),
-    "removed": ("Removed", "This link was removed by the person who shared it."),
-    "view": ("Ended", "This viewing session has ended. Use your link again if it still works."),
+    "opened": ("Already opened", "This link was already opened and cannot be used again." + ASK),
+    "expired": ("Expired", "This link has expired." + ASK),
+    "removed": ("Removed", "This link was removed by the person who shared it." + ASK),
+    "view": (
+        "Ended",
+        "This viewing session has ended. Use your link again if it still works." + ASK,
+    ),
 }
 TOO_MANY = ("Slow down", "Too many attempts. Wait a minute and try again.")
 
@@ -281,7 +293,7 @@ class ShareServer:
             if method != "POST":
                 return page(
                     405,
-                    ("Not allowed", "Use the Open button on the link page."),
+                    ("Not allowed", "Use the Open shared files button on the link page."),
                     extra={"allow": "POST"},
                 )
             raw = await self._body(receive)
