@@ -521,6 +521,33 @@ def test_sweep_race_commit_between_listing_and_db_read(two, monkeypatch):
     assert two.row(sid)["state"] == "live"
 
 
+def test_sweep_rechecks_mtime_right_before_removal(two, monkeypatch):
+    """An entry that was old at listing time but is touched before removal is kept."""
+    victim = pathlib.Path(two.data, "shares", "b" * 32)
+    victim.mkdir()
+    _age(two)
+    real = sweep._wanted
+
+    def touch_then_ask(conn, sub, name):
+        os.utime(victim, (two.now / 1000, two.now / 1000))  # a writer just used it
+        return real(conn, sub, name)
+
+    monkeypatch.setattr(sweep, "_wanted", touch_then_ask)
+    assert _sweep(two)["orphans"] == 0 and victim.is_dir()
+
+
+def test_failed_commit_leaves_no_empty_share_dir(two):
+    sid = os.urandom(16).hex()
+    two.put_meta("a", sid, two.meta({"a.txt": b"one"}))
+    two.put_file("a", sid, "a.txt", b"one")
+    two.sql(
+        "CREATE TRIGGER nolive BEFORE UPDATE OF state ON shares WHEN NEW.state='live'"
+        " BEGIN SELECT RAISE(ABORT,'no'); END"
+    )
+    assert two.req("a", "POST", f"/shares/{sid}/commit").status_code == 503
+    assert not pathlib.Path(two.data, "shares", sid).exists()
+
+
 def test_sweep_race_new_share_after_listing(two, monkeypatch):
     """A staged share created after the listing is not a candidate at all."""
     real = sweep._list

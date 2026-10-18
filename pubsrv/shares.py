@@ -7,10 +7,6 @@ missing one (404). Nothing in this module trusts a workspace taken from the URL.
 Known and accepted: creating an id that belongs to another workspace answers 409, which reveals that
 the id exists. Ids are 128-bit random, so this cannot be used to enumerate. Share ids are never freed.
 The write rate limiter is in memory: run the API as a single worker process (as the share server).
-
-Known and accepted: creating an id that belongs to another workspace answers 409, which reveals that
-the id exists. Ids are 128-bit random, so this cannot be used to enumerate. Share ids are never freed.
-The write rate limiter is in memory: run the API as a single worker process (as the share server).
 """
 
 import hashlib
@@ -228,6 +224,10 @@ class Store:
             os.path.join(self.share_dir("shares", sid), "files"),
             os.path.join(self.share_dir("incoming", sid), "files"),
         )
+        try:
+            os.rmdir(self.share_dir("shares", sid))  # only succeeds if empty
+        except OSError:
+            pass
 
     def drop_incoming(self, sid):
         import shutil
@@ -343,7 +343,7 @@ def op_commit(settings, store, ws, sid):
                 if not f["present"] or not store.verify_file(
                     "incoming", sid, f["path"], f["size"], f["sha256"]
                 ):
-                    missing = _missing(conn, store, sid)
+                    missing = _missing_verified(conn, store, sid)
                     raise Refusal(409, "incomplete", missing=missing)
         _txn(conn)
         try:
@@ -358,7 +358,7 @@ def op_commit(settings, store, ws, sid):
             if conn.execute(
                 "SELECT 1 FROM share_files WHERE share_id=? AND present=0", (sid,)
             ).fetchone():
-                raise Refusal(409, "incomplete", missing=_missing(conn, store, sid))
+                raise Refusal(409, "incomplete", missing=_unpresent(conn, sid))
             store.go_live(sid)
             try:
                 conn.execute("UPDATE shares SET state='live' WHERE id=?", (sid,))
@@ -379,7 +379,15 @@ def op_commit(settings, store, ws, sid):
         conn.close()
 
 
-def _missing(conn, store, sid):
+def _unpresent(conn, sid):
+    """Under the lock: only the paths not marked present (no hashing)."""
+    return sorted(
+        r["path"]
+        for r in conn.execute("SELECT path FROM share_files WHERE share_id=? AND present=0", (sid,))
+    )
+
+
+def _missing_verified(conn, store, sid):
     return sorted(
         f["path"]
         for f in conn.execute("SELECT * FROM share_files WHERE share_id=?", (sid,))

@@ -91,7 +91,13 @@ def run(db_path, data_dir, now_ms):
             for name, mtime_ms in entries:
                 if now_ms - mtime_ms < MIN_AGE_MS or _wanted(conn, sub, name):
                     continue
-                _rm(os.path.join(data_dir, sub, name))
+                path = os.path.join(data_dir, sub, name)
+                try:  # look again right before removing: it may have been touched since the listing
+                    if now_ms - os.lstat(path).st_mtime * 1000 < MIN_AGE_MS:
+                        continue
+                except OSError:
+                    continue
+                _rm(path)
                 counts["orphans"] += 1
     finally:
         conn.close()
