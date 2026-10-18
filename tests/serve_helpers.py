@@ -23,8 +23,8 @@ class Env:
         conn = db.connect(self.path)
         t = int(time.time() * 1000)
         conn.execute(
-            "INSERT INTO workspaces VALUES (?,?,?,?,?,?,?,?,?)",
-            ("b" * 32, "k", "p", "pk", 1, "{}", "active", t, t),
+            "INSERT INTO workspaces VALUES (?,?,?,?,?,?,?,?)",
+            ("b" * 32, "k", "p", "pk", "{}", "active", t, t),
         )
         conn.close()
         self.c = TestClient(self.app, base_url="http://127.0.0.1:8104", follow_redirects=False)

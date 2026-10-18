@@ -3,7 +3,12 @@
 import os
 import sqlite3
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # 2: workspaces.delegation_json replaces card_seq/card_json (design 2.6b)
+
+
+class SchemaError(Exception):
+    """The data dir was made by an older version of orch-publish."""
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS workspaces(
@@ -11,8 +16,7 @@ CREATE TABLE IF NOT EXISTS workspaces(
   wsk_pub TEXT NOT NULL,
   owner_person_id TEXT NOT NULL,
   owner_pk TEXT NOT NULL,
-  card_seq INTEGER NOT NULL,
-  card_json TEXT NOT NULL,
+  delegation_json TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','blocked')),
   created_ms INTEGER NOT NULL,
   updated_ms INTEGER NOT NULL
@@ -99,6 +103,13 @@ def connect(path):
 def init(path):
     conn = connect(path)
     try:
+        have = conn.execute("PRAGMA user_version").fetchone()[0]
+        has_tables = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table'").fetchone()
+        if (has_tables and have != SCHEMA_VERSION) or have > SCHEMA_VERSION:
+            raise SchemaError(
+                "this data dir was made by an older orch-publish (dev only, no upgrade path): "
+                "stop the server and delete the data dir, then start again"
+            )
         conn.executescript(SCHEMA)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
     finally:

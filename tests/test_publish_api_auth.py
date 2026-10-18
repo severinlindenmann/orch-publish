@@ -27,6 +27,7 @@ WS_B = VEC["ids"]["workspace_b"]
 PERSON = VEC["ids"]["person_alice"]
 CARD1 = VEC["card"]["card"]
 CARD2 = VEC["card"]["card_seq_2"]
+DELEG1 = CARD1["delegation"]
 PK = bytes.fromhex(VEC["card"]["cases"][0]["owner_pk_pub"])
 PK_B64 = proto.b64u(PK)
 
@@ -36,6 +37,15 @@ def _priv(name):
     n = proto.P256_N
     scalar = int.from_bytes(bytes.fromhex(VEC["keys"][name]["seed"]), "big") % (n - 1) + 1
     return ec.derive_private_key(scalar, ec.SECP256R1())
+
+
+def make_delegation(**over):
+    """A delegation signed by the owner PK of the vectors (core certs.make_delegation shape)."""
+    o = dict(DELEG1["o"])
+    o.update(over)
+    msg = proto.L["sig_ws_delegation"] + proto.cj(o)
+    r, s = decode_dss_signature(_priv("person_alice.sig").sign(msg, ec.ECDSA(hashes.SHA256())))
+    return {"o": o, "sig": proto.b64u(r.to_bytes(32, "big") + s.to_bytes(32, "big"))}
 
 
 def sign_headers(priv, ws, method, host, target, body=b"", ts=NOW, nonce=None):
@@ -96,8 +106,8 @@ class Env:
         )
         return self.c.request(method, path, content=body, headers=hdr)
 
-    def register(self, card=CARD1, ws=WS_A, **kw):
-        body = json.dumps({"card": card, "owner_pk": PK_B64}).encode()
+    def register(self, delegation=DELEG1, ws=WS_A, pk=PK_B64, **kw):
+        body = json.dumps({"delegation": delegation, "owner_pk": pk}).encode()
         return self.send("POST", f"/v1/ws/{ws}/register", body, ws=ws, **kw)
 
     def status(self, **kw):
@@ -205,7 +215,6 @@ def test_valid_request(env):
     r = env.status()
     assert r.status_code == 200 and r.json() == {
         "workspace": WS_A,
-        "card_seq": 1,
         "status": "active",
     }
 
@@ -470,7 +479,7 @@ def test_register_requires_allowlisted_owner(tmp_path):
     assert (r.status_code, err(r)) == (401, "unknown_workspace")
     assert e.sql("SELECT COUNT(*) FROM workspaces")[0][0] == 0
     e.allow()
-    assert e.register().json() == {"workspace": WS_A, "result": "registered", "card_seq": 1}
+    assert e.register().json() == {"workspace": WS_A, "result": "registered"}
 
 
 def test_unregistered_workspace_cannot_use_other_routes(tmp_path):
@@ -479,7 +488,8 @@ def test_unregistered_workspace_cannot_use_other_routes(tmp_path):
     assert err(e.status()) == "unknown_workspace"
 
 
-def test_register_signature_must_match_card_key(tmp_path):
+def test_register_signature_must_match_delegation_key(tmp_path):
+    """Request signed by a key other than the delegation's wsk_pub -> 401, nothing bound."""
     e = Env(tmp_path)
     e.allow()
     r = e.register(priv=_priv("wsk_b.sig"))
@@ -487,48 +497,105 @@ def test_register_signature_must_match_card_key(tmp_path):
     assert e.sql("SELECT COUNT(*) FROM workspaces")[0][0] == 0
 
 
-def test_register_card_for_another_workspace_refused(tmp_path):
+def test_register_delegation_for_another_workspace_refused(tmp_path):
+    """Delegation names WS_A but the path and signed header say WS_B."""
     e = Env(tmp_path)
     e.allow()
     e.allow(ws=WS_B)
-    r = e.register(ws=WS_B, priv=_priv("wsk_b.sig"))
-    assert (r.status_code, err(r)) == (400, "card_refused")
+    r = e.register(ws=WS_B)
+    assert (r.status_code, err(r)) == (400, "other_workspace")
+    assert e.sql("SELECT COUNT(*) FROM workspaces")[0][0] == 0
 
 
-def test_register_tampered_card_refused(tmp_path):
+def test_register_path_differs_from_signed_workspace_and_delegation(tmp_path):
+    """Header + delegation say WS_A, the path says WS_B."""
     e = Env(tmp_path)
     e.allow()
-    bad = copy.deepcopy(CARD1)
-    bad["o"]["relay_url"] = "https://relay.example.org"
-    r = e.register(card=bad)
-    assert r.status_code == 400 and r.json()["reason"] == "bad_signature"
+    body = json.dumps({"delegation": DELEG1, "owner_pk": PK_B64}).encode()
+    hdr = sign_headers(e.wsk, WS_A, "POST", HOST, f"/v1/ws/{WS_B}/register", body)
+    r = e.c.request("POST", f"/v1/ws/{WS_B}/register", content=body, headers=hdr)
+    assert (r.status_code, err(r)) == (400, "other_workspace")
+    assert e.sql("SELECT COUNT(*) FROM workspaces")[0][0] == 0
+
+
+def test_register_header_differs_from_delegation_workspace(tmp_path):
+    """Path + header say WS_B, the delegation is for WS_A (also with a WS_B pre-bind)."""
+    e = Env(tmp_path)
+    e.allow(ws=WS_B)
+    r = e.register(ws=WS_B, priv=_priv("wsk_b.sig"))
+    assert (r.status_code, err(r)) == (400, "other_workspace")
+
+
+def test_register_tampered_delegation_refused(tmp_path):
+    e = Env(tmp_path)
+    e.allow()
+    bad = copy.deepcopy(DELEG1)
+    bad["o"]["wsk_pub"] = proto.b64u(bytes.fromhex(VEC["keys"]["wsk_b.sig"]["pub"]))
+    r = e.register(delegation=bad, priv=_priv("wsk_b.sig"))
+    assert r.status_code == 400 and (err(r), r.json()["reason"]) == (
+        "delegation_refused",
+        "bad_signature",
+    )
+    assert e.sql("SELECT COUNT(*) FROM workspaces")[0][0] == 0
+
+
+def test_register_delegation_naming_another_person_refused(tmp_path):
+    """Signed by the owner PK but owner_person_id is somebody else's."""
+    e = Env(tmp_path)
+    e.allow()
+    bad = make_delegation(owner_person_id=VEC["ids"]["person_bob"])
+    r = e.register(delegation=bad)
+    assert (r.status_code, err(r), r.json()["reason"]) == (
+        400,
+        "delegation_refused",
+        "other_person",
+    )
 
 
 def test_register_wrong_owner_pk_refused(tmp_path):
     e = Env(tmp_path)
     e.allow()
-    body = json.dumps(
-        {"card": CARD1, "owner_pk": proto.b64u(bytes.fromhex(VEC["keys"]["wsk_a.sig"]["pub"]))}
-    ).encode()
-    r = e.send("POST", f"/v1/ws/{WS_A}/register", body)
+    other = proto.b64u(bytes.fromhex(VEC["keys"]["wsk_a.sig"]["pub"]))
+    r = e.register(pk=other)
     assert (r.status_code, err(r)) == (401, "unknown_workspace")  # person id not pre-bound (L3)
+    # pre-bound to that other person too: now the delegation does not verify under that PK
+    pid = proto.identifier("person", bytes.fromhex(VEC["keys"]["wsk_a.sig"]["pub"]))
+    e.allow(person=pid)
+    r = e.register(pk=other)
+    assert (r.status_code, err(r), r.json()["reason"]) == (
+        400,
+        "delegation_refused",
+        "bad_signature",
+    )
+    assert e.sql("SELECT COUNT(*) FROM workspaces")[0][0] == 0
 
 
 @pytest.mark.parametrize(
-    "body", [b"{}", b"[]", b"not json", b'{"card":{},"owner_pk":"x"}', b'{"card":1,"owner_pk":"x"}']
+    "body",
+    [
+        b"{}",
+        b"[]",
+        b"not json",
+        b'{"delegation":{},"owner_pk":"x"}',
+        b'{"delegation":1,"owner_pk":"x"}',
+    ],
 )
 def test_register_malformed_body(tmp_path, body):
     e = Env(tmp_path)
     e.allow()
     r = e.send("POST", f"/v1/ws/{WS_A}/register", body)
-    assert r.status_code == 400 and err(r) in ("malformed", "card_refused")
+    assert r.status_code == 400 and err(r) == "malformed"
 
 
 def test_register_extra_field_refused(tmp_path):
     e = Env(tmp_path)
     e.allow()
-    body = json.dumps({"card": CARD1, "owner_pk": PK_B64, "x": 1}).encode()
+    for extra in ({"x": 1}, {"card": CARD1}):
+        body = json.dumps({"delegation": DELEG1, "owner_pk": PK_B64, **extra}).encode()
+        assert err(e.send("POST", f"/v1/ws/{WS_A}/register", body)) == "malformed"
+    body = json.dumps({"card": CARD1, "owner_pk": PK_B64}).encode()  # the old shape
     assert err(e.send("POST", f"/v1/ws/{WS_A}/register", body)) == "malformed"
+    assert e.sql("SELECT COUNT(*) FROM workspaces")[0][0] == 0
 
 
 def test_block_bites_on_the_next_request(env):
@@ -559,32 +626,61 @@ def test_removing_owner_from_allowlist_bites_on_the_next_request(env):
     assert env.status().status_code == 200
 
 
-# --- card_seq ---------------------------------------------------------------------------------
+# --- the binding is permanent (design 2.6b) -----------------------------------------------------
 
 
-def test_card_seq_rollback_refused(env):
-    r = env.register(card=CARD2)
-    assert r.json() == {"workspace": WS_A, "result": "updated", "card_seq": 2}
-    r = env.register(card=CARD1)
-    assert (r.status_code, err(r), r.json()["reason"]) == (409, "card_refused", "stale_card")
-    assert env.sql("SELECT card_seq FROM workspaces")[0][0] == 2
-    assert env.status().json()["card_seq"] == 2
+def test_identical_reregister_is_unchanged(env):
+    assert env.register().json() == {"workspace": WS_A, "result": "unchanged"}
+    assert env.sql("SELECT COUNT(*) FROM workspaces")[0][0] == 1
 
 
-def test_identical_card_is_idempotent_and_same_seq_other_card_refused(env):
-    assert env.register().json()["result"] == "unchanged"
-    same_seq = next(c for c in VEC["card"]["cases"] if c["name"] == "same_seq_other_sealed")
-    r = env.register(card=same_seq["card"])
-    assert r.status_code in (400, 409) and err(r) == "card_refused"
-    assert env.sql("SELECT card_seq FROM workspaces")[0][0] == 1
+def test_stored_binding_fields(env):
+    row = env.sql("SELECT * FROM workspaces")[0]
+    assert (row["workspace_id"], row["wsk_pub"], row["owner_person_id"], row["owner_pk"]) == (
+        WS_A,
+        DELEG1["o"]["wsk_pub"],
+        PERSON,
+        PK_B64,
+    )
+    assert row["delegation_json"] == proto.cj(DELEG1).decode()
+    assert "card_seq" not in row.keys() and "card_json" not in row.keys()  # noqa: SIM118
 
 
-def test_binding_is_permanent_wsk_and_owner_never_change(env):
-    row = env.sql("SELECT wsk_pub, owner_person_id FROM workspaces")[0]
-    c = next(c for c in VEC["card"]["cases"] if c["name"] == "wsk_changed")
-    r = env.register(card=c["card"])
-    assert err(r) == "card_refused"
-    assert tuple(env.sql("SELECT wsk_pub, owner_person_id FROM workspaces")[0]) == tuple(row)
+def test_changed_delegation_is_409_even_if_valid_and_newer(env):
+    before = tuple(env.sql("SELECT * FROM workspaces")[0])
+    newer = make_delegation(issued_ms=DELEG1["o"]["issued_ms"] + 1)
+    r = env.register(delegation=newer)
+    assert (r.status_code, err(r)) == (409, "delegation_changed")
+    other_key = make_delegation(wsk_pub=proto.b64u(bytes.fromhex(VEC["keys"]["wsk_b.sig"]["pub"])))
+    r = env.register(delegation=other_key)
+    assert (r.status_code, err(r)) == (409, "delegation_changed")
+    assert tuple(env.sql("SELECT * FROM workspaces")[0]) == before
+
+
+def test_not_bound_unknown_workspace_with_valid_delegation_is_401(tmp_path):
+    e = Env(tmp_path)
+    e.allow(ws=None)
+    r = e.register()
+    assert (r.status_code, err(r)) == (401, "unknown_workspace")
+
+
+def test_only_unbind_releases_the_binding(env):
+    assert err(env.register(delegation=make_delegation(issued_ms=1))) == "delegation_changed"
+    cli.main(["admin", "--data", env.data, "ws", "unbind", WS_A])
+    cli.main(["admin", "--data", env.data, "ws", "allow", WS_A, PERSON])
+    assert env.register(delegation=make_delegation(issued_ms=1)).json()["result"] == "registered"
+
+
+def test_older_data_dir_refuses_to_start(tmp_path):
+    data = str(tmp_path / "old")
+    path = db.prepare_dir(data)
+    conn = db.connect(path)
+    conn.execute("CREATE TABLE workspaces(workspace_id TEXT, card_seq INTEGER, card_json TEXT)")
+    conn.execute("PRAGMA user_version=1")
+    conn.close()
+    with pytest.raises(db.SchemaError, match="delete the data dir"):
+        create_app(data, HOST)
+    assert cli.main(["admin", "--data", data, "owners", "list"]) == 2
 
 
 # --- concurrency / nonce store ----------------------------------------------------------------
@@ -713,7 +809,7 @@ def test_prebind_is_checked_inside_the_register_transaction(tmp_path):
     conn = db.connect(e.path)
     try:
         with pytest.raises(auth.Refusal) as x:
-            registry.register(conn, WS_A, CARD1, PK, NOW)
+            registry.register(conn, WS_A, DELEG1, PK, NOW)
         assert x.value.error == "unknown_workspace"
         assert e.sql("SELECT COUNT(*) FROM workspaces")[0][0] == 0
     finally:
@@ -739,11 +835,13 @@ def test_all_unknown_register_failures_look_alike(tmp_path):
     )
 
 
-def test_card_is_not_verified_for_a_non_allowlisted_owner(tmp_path, monkeypatch):
+def test_delegation_is_not_verified_for_a_non_allowlisted_owner(tmp_path, monkeypatch):
     from pubsrv import registry
 
     e = Env(tmp_path)
-    monkeypatch.setattr(registry.proto, "verify_card", lambda *a: pytest.fail("verify_card ran"))
+    monkeypatch.setattr(
+        registry.proto, "verify_delegation", lambda *a: pytest.fail("verify_delegation ran")
+    )
     assert err(e.register()) == "unknown_workspace"
 
 
@@ -893,13 +991,12 @@ def test_unbind_and_reregister_with_new_card_between_admission_and_body_refuses(
     def swap():
         cli.main(["admin", "--data", env.data, "ws", "unbind", WS_A])
         env.sql(
-            "INSERT INTO workspaces(workspace_id, wsk_pub, owner_person_id, owner_pk, card_seq,"
-            " card_json, created_ms, updated_ms) VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT INTO workspaces(workspace_id, wsk_pub, owner_person_id, owner_pk,"
+            " delegation_json, created_ms, updated_ms) VALUES (?,?,?,?,?,?,?)",
             WS_A,
             "another-key",
             PERSON,
             PK_B64,
-            1,
             "{}",
             NOW,
             NOW,

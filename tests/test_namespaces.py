@@ -184,8 +184,8 @@ def test_unbind_keeps_ids_reserved(two):
     two.req("a", "DELETE", f"/shares/{gone}")
     r = two.sql("SELECT * FROM workspaces WHERE workspace_id=?", WS_A)[0]
     saved = (
-        r["workspace_id"], r["wsk_pub"], r["owner_person_id"], r["owner_pk"], r["card_seq"],
-        r["card_json"], r["created_ms"], r["updated_ms"],
+        r["workspace_id"], r["wsk_pub"], r["owner_person_id"], r["owner_pk"],
+        r["delegation_json"], r["created_ms"], r["updated_ms"],
     )  # fmt: skip
     assert cli.main(["admin", "--data", two.data, "ws", "unbind", WS_A]) == 0
     assert {two.row(live)["state"], two.row(gone)["state"]} == {"revoked"}
@@ -195,7 +195,7 @@ def test_unbind_keeps_ids_reserved(two):
         assert (r.status_code, err(r)) == (409, "conflict")
     # a re-registered A (same row back) sees none of them: re-keyed rows never match owned_share
     two.sql(
-        "INSERT INTO workspaces VALUES (?,?,?,?,?,?,'active',?,?)",
+        "INSERT INTO workspaces VALUES (?,?,?,?,?,'active',?,?)",
         *saved,
     )
     assert two.req("a", "GET", "/shares").json() == {"shares": []}
