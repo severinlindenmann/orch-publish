@@ -1,0 +1,72 @@
+{
+ "cases": [
+  {
+   "body": "7b22617070223a22696e766f69636573222c2266696c6573223a317d",
+   "expect": {
+    "error": "replay",
+    "status": 401
+   },
+   "headers": {
+    "Orch-Nonce": "0102030405060708090a0b0c0d0e0f10",
+    "Orch-Signature": "-M4iTolvRWu7pAytMoRC5QyP4LC43P5BD8s8R6sDAH9w_HM1JXYMCR_edwTvJpFFnkFfyWM-7UptSgOjffeHkQ",
+    "Orch-Ts": "1790000120000",
+    "Orch-Workspace": "705d40abbb8c1c90354a1acaa94c935c"
+   },
+   "host": "pub.dev.severin.io",
+   "method": "PUT",
+   "name": "replay_at_exactly_nonce_retention_end",
+   "nonces": {
+    "705d40abbb8c1c90354a1acaa94c935c": {
+     "0102030405060708090a0b0c0d0e0f10": 1790000240000
+    }
+   },
+   "now_ms": 1790000240000,
+   "target": "/v1/apps/invoices?x=1"
+  },
+  {
+   "body": "7b22617070223a22696e766f69636573222c2266696c6573223a317d",
+   "expect": {
+    "error": "stale_timestamp",
+    "server_ms": 1790000240001,
+    "status": 401
+   },
+   "headers": {
+    "Orch-Nonce": "0102030405060708090a0b0c0d0e0f10",
+    "Orch-Signature": "-M4iTolvRWu7pAytMoRC5QyP4LC43P5BD8s8R6sDAH9w_HM1JXYMCR_edwTvJpFFnkFfyWM-7UptSgOjffeHkQ",
+    "Orch-Ts": "1790000120000",
+    "Orch-Workspace": "705d40abbb8c1c90354a1acaa94c935c"
+   },
+   "host": "pub.dev.severin.io",
+   "method": "PUT",
+   "name": "expired_nonce_is_purged_one_ms_later",
+   "nonces": {
+    "705d40abbb8c1c90354a1acaa94c935c": {
+     "0102030405060708090a0b0c0d0e0f10": 1790000240000
+    }
+   },
+   "now_ms": 1790000240001,
+   "target": "/v1/apps/invoices?x=1"
+  },
+  {
+   "body": "7b22617070223a22696e766f69636573222c2266696c6573223a317d",
+   "expect": {
+    "status": 200,
+    "workspace": "705d40abbb8c1c90354a1acaa94c935c"
+   },
+   "headers": {
+    "Orch-Nonce": "0102030405060708090a0b0c0d0e0f10",
+    "Orch-Signature": "-M4iTolvRWu7pAytMoRC5QyP4LC43P5BD8s8R6sDAH9w_HM1JXYMCR_edwTvJpFFnkFfyWM-7UptSgOjffeHkQ",
+    "Orch-Ts": "1790000120000",
+    "Orch-Workspace": "705d40abbb8c1c90354a1acaa94c935c"
+   },
+   "host": "pub.dev.severin.io",
+   "method": "PUT",
+   "name": "first_use_with_ts_at_the_future_edge",
+   "nonces": {},
+   "now_ms": 1790000000000,
+   "target": "/v1/apps/invoices?x=1"
+  }
+ ],
+ "comment": "EXTRA edge vectors for orch-publish pubsrv (L1), same shape as publish.cases in publish_v2.json; not in the relay vector file (propose to orch-relay). Suite 2, fake keys.",
+ "suite": 2
+}

@@ -7,8 +7,10 @@ Order (exact):
   4 the signature                 -> 401 bad_signature
   5 the nonce is unseen           -> 401 replay; then it is recorded for 240 s
 The signature comes before the nonce store, so junk cannot fill it. Policy checks that are not part of
-12.1 (blocked workspace, owner no longer on the allowlist, path workspace) sit between 4 and 5: they
-need an authenticated caller and they never record a nonce.
+12.1 (blocked workspace, owner no longer on the allowlist, path workspace) come after step 5 (L2): the
+caller is authenticated, and a refused request still spends its nonce, so a refused request can never be
+replayed as a probe. Steps 1-3 run before the body is read (M1). An expired nonce is purged when
+until_ms < now (L1), so a replay exactly at the end of retention is still a replay.
 """
 
 import hashlib
@@ -100,7 +102,7 @@ class MemoryNonces:
     def record(self, ws_hex, nonce_hex, now_ms):
         seen = self.seen.setdefault(ws_hex, {})
         for n, until in list(seen.items()):
-            if until <= now_ms:
+            if until < now_ms:
                 del seen[n]
         if nonce_hex in seen:
             return False
@@ -121,7 +123,7 @@ class DbNonces:
         c = self.conn
         c.execute("BEGIN IMMEDIATE")
         try:
-            c.execute("DELETE FROM nonces WHERE until_ms <= ?", (now_ms,))
+            c.execute("DELETE FROM nonces WHERE until_ms < ?", (now_ms,))
             try:
                 c.execute(
                     "INSERT INTO nonces(ws, nonce, until_ms) VALUES (?,?,?)",

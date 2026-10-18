@@ -21,6 +21,11 @@ CREATE TABLE IF NOT EXISTS owners(
   person_id TEXT PRIMARY KEY,
   added_ms INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS prebinds(
+  workspace_id TEXT PRIMARY KEY,
+  person_id TEXT NOT NULL,
+  added_ms INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS nonces(
   ws TEXT NOT NULL,
   nonce TEXT NOT NULL,
@@ -30,7 +35,7 @@ CREATE TABLE IF NOT EXISTS nonces(
 CREATE INDEX IF NOT EXISTS nonces_until ON nonces(until_ms);
 CREATE TABLE IF NOT EXISTS shares(
   id TEXT PRIMARY KEY,
-  owner_ws TEXT NOT NULL REFERENCES workspaces(workspace_id),
+  owner_ws TEXT NOT NULL,  -- no FK: tombstones outlive an unbind
   ticket TEXT NOT NULL,
   kind TEXT NOT NULL CHECK(kind IN ('secret','once')),
   token_hash TEXT NOT NULL,
@@ -52,8 +57,20 @@ CREATE TABLE IF NOT EXISTS views(
 
 
 def prepare_dir(data_dir):
+    """Create the data dir 0700. An existing dir that is not ours is refused; a looser mode is
+    tightened, and if that fails we refuse to start (L5)."""
     os.makedirs(data_dir, mode=0o700, exist_ok=True)
-    return os.path.join(data_dir, "publish.db")
+    st = os.stat(data_dir)
+    if st.st_uid != os.getuid():
+        raise PermissionError("data dir is not owned by this user")
+    if st.st_mode & 0o077:
+        os.chmod(data_dir, 0o700)
+        if os.stat(data_dir).st_mode & 0o077:
+            raise PermissionError("data dir must be 0700")
+    path = os.path.join(data_dir, "publish.db")
+    if os.path.exists(path) and os.stat(path).st_mode & 0o077:
+        os.chmod(path, 0o600)
+    return path
 
 
 def connect(path):

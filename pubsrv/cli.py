@@ -54,6 +54,15 @@ def admin(args, out=None):
                         file=out,
                     )
                 return 0
+            if args.action == "allow":
+                conn.execute(
+                    "INSERT OR REPLACE INTO prebinds(workspace_id, person_id, added_ms) VALUES (?,?,?)",
+                    (args.id, args.person, _now()),
+                )
+                print(f"workspace {args.id} may register for owner {args.person}", file=out)
+                return 0
+            if args.action == "unbind":
+                return _unbind(conn, args.id, out)
             status = "blocked" if args.action == "block" else "active"
             n = conn.execute(
                 "UPDATE workspaces SET status=?, updated_ms=? WHERE workspace_id=?",
@@ -68,16 +77,40 @@ def admin(args, out=None):
     return 0
 
 
+def _unbind(conn, ws, out):
+    """Forget a workspace: drop its binding and pre-binding and revoke (tombstone) its shares, in one
+    transaction. Files are removed by the share lifecycle (P2); the tombstone rows stay."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        n = conn.execute("DELETE FROM workspaces WHERE workspace_id=?", (ws,)).rowcount
+        conn.execute("DELETE FROM prebinds WHERE workspace_id=?", (ws,))
+        conn.execute("DELETE FROM nonces WHERE ws=?", (ws,))
+        k = conn.execute(
+            "UPDATE shares SET state='revoked' WHERE owner_ws=? AND state!='revoked'", (ws,)
+        ).rowcount
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    print(
+        f"workspace {ws} unbound ({k} shares revoked)" if n else f"workspace {ws} was not bound",
+        file=out,
+    )
+    return 0
+
+
 def serve(args):
     import uvicorn
 
     from .app import create_app
 
-    host, _, port = args.api_host.rpartition(":")
+    host, _, port = args.bind.rpartition(":")
     if host not in LOOPBACK or not port.isdigit():
-        print("serve binds loopback only: --api-host must be 127.0.0.1:PORT", file=sys.stderr)
+        print("serve binds loopback only: --bind must be 127.0.0.1:PORT", file=sys.stderr)
         return 2
-    app = create_app(args.data, args.api_host)
+    # --api-host is what clients sign (it may be a public name when a proxy sits in front); it
+    # defaults to the bind address
+    app = create_app(args.data, args.api_host or args.bind)
     # no access log: request lines carry ids, and the no-logging policy applies (design I15)
     uvicorn.run(
         app,
@@ -94,7 +127,8 @@ def main(argv=None):
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("serve", help="run the API on loopback")
     s.add_argument("--data", required=True)
-    s.add_argument("--api-host", default="127.0.0.1:8103", help="host:port clients sign and reach")
+    s.add_argument("--bind", default="127.0.0.1:8103", help="loopback host:port to listen on")
+    s.add_argument("--api-host", default=None, help="host[:port] clients sign (default: --bind)")
     a = sub.add_parser("admin", help="owner allowlist and blocking")
     a.add_argument("--data", required=True)
     g = a.add_subparsers(dest="group", required=True)
@@ -106,6 +140,12 @@ def main(argv=None):
     for name in ("block", "unblock"):
         w.add_parser(name).add_argument("id", type=_id)
     w.add_parser("list")
+    al = w.add_parser("allow", help="pre-bind a workspace id to an owner so it may register")
+    al.add_argument("id", type=_id)
+    al.add_argument("person", type=_id)
+    w.add_parser("unbind", help="forget a workspace and revoke its shares").add_argument(
+        "id", type=_id
+    )
     args = p.parse_args(argv)
     return serve(args) if args.cmd == "serve" else admin(args)
 

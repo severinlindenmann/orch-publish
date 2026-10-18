@@ -48,6 +48,21 @@ def card_key(card, pk, ws_hex):
     return res["ok"]["wsk_pub"]
 
 
+def require_prebound(conn, ws_hex, person_id):
+    """An unknown workspace may register only if the admin pre-bound it to this owner (M2) and the
+    owner is on the allowlist. Every failure is the same 401, whatever the reason (L3)."""
+    ok = (
+        conn.execute(
+            "SELECT 1 FROM prebinds p JOIN owners o ON o.person_id = p.person_id"
+            " WHERE p.workspace_id=? AND p.person_id=?",
+            (ws_hex, person_id),
+        ).fetchone()
+        is not None
+    )
+    if not ok:
+        raise Refusal(401, "unknown_workspace")
+
+
 def get_workspace(conn, ws_hex):
     return conn.execute("SELECT * FROM workspaces WHERE workspace_id=?", (ws_hex,)).fetchone()
 
@@ -70,6 +85,9 @@ def register(conn, ws_hex, card, pk, now_ms):
     conn.execute("BEGIN IMMEDIATE")
     try:
         row = get_workspace(conn, ws_hex)
+        if row is None:
+            # checked on freshly read state, inside the lock (M2)
+            require_prebound(conn, ws_hex, proto.identifier("person", pk))
         if row is not None:
             check_admitted(conn, row)
             old = json.loads(row["card_json"])

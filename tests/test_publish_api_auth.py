@@ -66,8 +66,11 @@ class Env:
         finally:
             conn.close()
 
-    def allow(self, person=PERSON):
+    def allow(self, person=PERSON, ws=WS_A):
+        """Owner on the allowlist and the workspace pre-bound to it (M2)."""
         self.sql("INSERT OR IGNORE INTO owners VALUES (?,?)", person, NOW)
+        if ws:
+            self.sql("INSERT OR REPLACE INTO prebinds VALUES (?,?,?)", ws, person, NOW)
 
     def send(
         self,
@@ -374,7 +377,7 @@ def test_path_workspace_must_equal_signed_workspace(env):
     env.allow(VEC["ids"]["person_bob"])
     r = env.send("GET", f"/v1/ws/{WS_B}/status", ws=WS_A)
     assert (r.status_code, err(r)) == (403, "wrong_workspace")
-    assert env.sql("SELECT COUNT(*) FROM nonces")[0][0] == 1  # only the register nonce
+    assert env.sql("SELECT COUNT(*) FROM nonces")[0][0] == 2  # register + this one (L2)
 
 
 def test_unknown_route_is_404_after_auth_and_unauthenticated_is_never_served(env):
@@ -383,9 +386,71 @@ def test_unknown_route_is_404_after_auth_and_unauthenticated_is_never_served(env
     assert env.c.get("/openapi.json").status_code == 400
 
 
-def test_oversize_body_refused(env):
-    r = env.c.post(f"/v1/ws/{WS_A}/x", content=b"x" * (26 * 1024 * 1024 + 1))
-    assert r.status_code == 413
+def _signed_big(env, method, path, size, ws=WS_A):
+    body = b"x" * size
+    hdr = sign_headers(env.wsk, ws, method, HOST, path, body)
+    return env.c.request(method, path, content=body, headers=hdr)
+
+
+def test_body_limits_are_per_route(env):
+    sid = "ab" * 16
+    file_path = f"/v1/ws/{WS_A}/shares/{sid}/files/a.txt"
+    # a known workspace: 1 MiB for ordinary routes, 26 MiB only for a file PUT
+    assert _signed_big(env, "POST", f"/v1/ws/{WS_A}/x", 1024 * 1024 + 1).status_code == 413
+    r = _signed_big(env, "PUT", file_path, 1024 * 1024 + 1)
+    assert r.status_code == 404  # size accepted (past auth), no such route yet
+    assert _signed_big(env, "PUT", file_path, 26 * 1024 * 1024 + 1).status_code == 413
+    # register is 64 KiB
+    assert _signed_big(env, "POST", f"/v1/ws/{WS_A}/register", 64 * 1024 + 1).status_code == 413
+    # a GET/POST to the file path is not a file PUT
+    assert _signed_big(env, "POST", file_path, 2 * 1024 * 1024).status_code == 413
+
+
+def test_unknown_workspace_gets_only_64k(tmp_path):
+    e = Env(tmp_path)
+    e.allow()
+    big = _signed_big(e, "POST", f"/v1/ws/{WS_A}/register", 64 * 1024 + 1)
+    assert big.status_code == 413
+
+
+def _asgi(app, scope_extra, headers, body=b""):
+    import asyncio
+
+    reads = []
+    out = []
+
+    async def receive():
+        reads.append(1)
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    async def send(m):
+        out.append(m)
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": f"/v1/ws/{WS_A}/x",
+        "raw_path": f"/v1/ws/{WS_A}/x".encode(),
+        "query_string": b"",
+        "headers": headers,
+        **scope_extra,
+    }
+    asyncio.run(app(scope, receive, send))
+    return reads, out
+
+
+@pytest.mark.parametrize("kind", ["malformed", "stale", "unknown"])
+def test_body_is_not_read_before_steps_1_to_3(env, kind):
+    hdr = sign_headers(env.wsk, WS_A, "POST", HOST, f"/v1/ws/{WS_A}/x")
+    if kind == "malformed":
+        del hdr["Orch-Nonce"]
+    if kind == "stale":
+        hdr = sign_headers(env.wsk, WS_A, "POST", HOST, f"/v1/ws/{WS_A}/x", ts=NOW + 500_000)
+    if kind == "unknown":
+        hdr = sign_headers(_priv("wsk_b.sig"), WS_B, "POST", HOST, f"/v1/ws/{WS_B}/x")
+    reads, out = _asgi(env.app, {}, [(k.lower().encode(), v.encode()) for k, v in hdr.items()])
+    assert reads == []
+    assert out[0]["status"] == (400 if kind == "malformed" else 401)
 
 
 def test_db_failure_fails_closed(env):
@@ -402,7 +467,7 @@ def test_db_failure_fails_closed(env):
 def test_register_requires_allowlisted_owner(tmp_path):
     e = Env(tmp_path)
     r = e.register()
-    assert (r.status_code, err(r)) == (403, "owner_not_allowed")
+    assert (r.status_code, err(r)) == (401, "unknown_workspace")
     assert e.sql("SELECT COUNT(*) FROM workspaces")[0][0] == 0
     e.allow()
     assert e.register().json() == {"workspace": WS_A, "result": "registered", "card_seq": 1}
@@ -425,6 +490,7 @@ def test_register_signature_must_match_card_key(tmp_path):
 def test_register_card_for_another_workspace_refused(tmp_path):
     e = Env(tmp_path)
     e.allow()
+    e.allow(ws=WS_B)
     r = e.register(ws=WS_B, priv=_priv("wsk_b.sig"))
     assert (r.status_code, err(r)) == (400, "card_refused")
 
@@ -445,7 +511,7 @@ def test_register_wrong_owner_pk_refused(tmp_path):
         {"card": CARD1, "owner_pk": proto.b64u(bytes.fromhex(VEC["keys"]["wsk_a.sig"]["pub"]))}
     ).encode()
     r = e.send("POST", f"/v1/ws/{WS_A}/register", body)
-    assert (r.status_code, err(r)) == (400, "card_refused")
+    assert (r.status_code, err(r)) == (401, "unknown_workspace")  # person id not pre-bound (L3)
 
 
 @pytest.mark.parametrize(
@@ -475,11 +541,14 @@ def test_block_bites_on_the_next_request(env):
     assert env.status().status_code == 200
 
 
-def test_blocked_request_does_not_record_a_nonce(env):
+def test_blocked_request_records_its_nonce_and_cannot_be_replayed(env):
+    """L2: the nonce is spent before the policy refusals."""
     env.sql("UPDATE workspaces SET status='blocked'")
     n = env.sql("SELECT COUNT(*) FROM nonces")[0][0]
-    env.status()
-    assert env.sql("SELECT COUNT(*) FROM nonces")[0][0] == n
+    hdr = sign_headers(env.wsk, WS_A, "GET", HOST, f"/v1/ws/{WS_A}/status")
+    assert err(env.status(headers=hdr)) == "workspace_blocked"
+    assert env.sql("SELECT COUNT(*) FROM nonces")[0][0] == n + 1
+    assert err(env.status(headers=hdr)) == "replay"
 
 
 def test_removing_owner_from_allowlist_bites_on_the_next_request(env):
@@ -575,11 +644,38 @@ def test_admin_cli(tmp_path, capsys):
         cli.main(["admin", "--data", d, "owners", "add", "not-hex"])
 
 
-def test_serve_refuses_non_loopback(tmp_path):
-    assert cli.main(["serve", "--data", str(tmp_path / "s"), "--api-host", "0.0.0.0:8103"]) == 2
+def test_serve_refuses_non_loopback_bind(tmp_path, monkeypatch):
+    import uvicorn
+
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: pytest.fail("must not start"))
+    for bind in ("0.0.0.0:8103", "pub.example.com:80", "10.0.0.5:8103", "127.0.0.1"):
+        assert cli.main(["serve", "--data", str(tmp_path / "s"), "--bind", bind]) == 2
+
+
+def test_serve_api_host_is_separate_from_bind(tmp_path, monkeypatch):
+    """L4: a public name to sign, a loopback address to listen on."""
+    import uvicorn
+
+    seen = {}
+    monkeypatch.setattr(uvicorn, "run", lambda app, **k: seen.update(k, app=app))
     assert (
-        cli.main(["serve", "--data", str(tmp_path / "s"), "--api-host", "pub.example.com:80"]) == 2
+        cli.main(
+            [
+                "serve",
+                "--data",
+                str(tmp_path / "s"),
+                "--bind",
+                "127.0.0.1:9103",
+                "--api-host",
+                "pub.dev.severin.io",
+            ]
+        )
+        == 0
     )
+    assert (seen["host"], seen["port"], seen["access_log"]) == ("127.0.0.1", 9103, False)
+    assert seen["app"].state.settings.api_host == "pub.dev.severin.io"
+    assert cli.main(["serve", "--data", str(tmp_path / "s"), "--bind", "127.0.0.1:9104"]) == 0
+    assert seen["app"].state.settings.api_host == "127.0.0.1:9104"
 
 
 def test_no_secret_or_key_in_logs(env, caplog):
@@ -594,3 +690,138 @@ def test_no_secret_or_key_in_logs(env, caplog):
 def test_data_dir_and_db_are_private(env):
     assert (os.stat(env.data).st_mode & 0o777) == 0o700
     assert (os.stat(env.path).st_mode & 0o777) == 0o600
+
+
+# --- P1b hardening: M2 pre-binding, L1, L3, L5 ---------------------------------------------------
+
+
+def test_unknown_workspace_registers_only_if_prebound_to_that_owner(tmp_path):
+    e = Env(tmp_path)
+    e.allow(ws=None)  # owner on the allowlist, workspace NOT pre-bound
+    assert err(e.register()) == "unknown_workspace"
+    e.sql("INSERT INTO prebinds VALUES (?,?,?)", WS_A, VEC["ids"]["person_bob"], NOW)
+    assert err(e.register()) == "unknown_workspace"  # pre-bound to somebody else
+    e.sql("UPDATE prebinds SET person_id=?", PERSON)
+    assert e.register().status_code == 200
+
+
+def test_prebind_is_checked_inside_the_register_transaction(tmp_path):
+    from pubsrv import registry
+
+    e = Env(tmp_path)
+    e.allow(ws=None)
+    conn = db.connect(e.path)
+    try:
+        with pytest.raises(auth.Refusal) as x:
+            registry.register(conn, WS_A, CARD1, PK, NOW)
+        assert x.value.error == "unknown_workspace"
+        assert e.sql("SELECT COUNT(*) FROM workspaces")[0][0] == 0
+    finally:
+        conn.close()
+
+
+def test_prebinding_without_allowlist_is_not_enough(tmp_path):
+    e = Env(tmp_path)
+    e.sql("INSERT INTO prebinds VALUES (?,?,?)", WS_A, PERSON, NOW)
+    assert err(e.register()) == "unknown_workspace"
+
+
+def test_all_unknown_register_failures_look_alike(tmp_path):
+    """L3: no allowlist / not pre-bound / other owner: the same 401 and the same body."""
+    e = Env(tmp_path)
+    a = e.register()
+    e.sql("INSERT INTO owners VALUES (?,?)", PERSON, NOW)
+    b = e.register()
+    assert (
+        (a.status_code, a.json())
+        == (b.status_code, b.json())
+        == (401, {"error": "unknown_workspace"})
+    )
+
+
+def test_card_is_not_verified_for_a_non_allowlisted_owner(tmp_path, monkeypatch):
+    from pubsrv import registry
+
+    e = Env(tmp_path)
+    monkeypatch.setattr(registry.proto, "verify_card", lambda *a: pytest.fail("verify_card ran"))
+    assert err(e.register()) == "unknown_workspace"
+
+
+def test_admin_ws_allow_and_unbind(tmp_path):
+    e = Env(tmp_path)
+    d = e.data
+    assert cli.main(["admin", "--data", d, "owners", "add", PERSON]) == 0
+    assert cli.main(["admin", "--data", d, "ws", "allow", WS_A, PERSON]) == 0
+    assert e.register().status_code == 200
+    e.sql(
+        "INSERT INTO shares(id, owner_ws, ticket, kind, token_hash, expires_ms, state, created_ms)"
+        " VALUES ('s1', ?, 'T-1', 'secret', 'h', 1, 'live', 1)",
+        WS_A,
+    )
+    assert cli.main(["admin", "--data", d, "ws", "unbind", WS_A]) == 0
+    assert e.sql("SELECT state FROM shares WHERE id='s1'")[0][0] == "revoked"  # tombstone kept
+    assert e.sql("SELECT COUNT(*) FROM workspaces")[0][0] == 0
+    assert e.sql("SELECT COUNT(*) FROM prebinds")[0][0] == 0
+    assert err(e.status()) == "unknown_workspace"
+    assert err(e.register()) == "unknown_workspace"  # needs a new allow
+    assert cli.main(["admin", "--data", d, "ws", "unbind", WS_A]) == 0  # idempotent
+
+
+def test_nonce_survives_exactly_until_the_end_of_retention(env):
+    """L1/edge vector: a nonce recorded at t0 with a ts 120 s ahead is still a replay at exactly
+    t0+240000 (the ts is then still inside the window)."""
+    extra = json.loads((ROOT / "tests/vectors/publish_v2_extra.json").read_text())
+    for c in extra["cases"]:
+        cards = {WS_A: CARD1["o"]["wsk_pub"]}
+        nonces = copy.deepcopy(c["nonces"])
+        got = auth.publish_check(
+            c["headers"],
+            c["method"],
+            c["host"],
+            c["target"],
+            bytes.fromhex(c["body"]),
+            cards,
+            nonces,
+            c["now_ms"],
+        )
+        assert got == c["expect"], c["name"]
+
+
+def test_db_nonce_purge_is_strictly_before_now(env):
+    t0 = NOW
+    hdr = sign_headers(env.wsk, WS_A, "GET", HOST, f"/v1/ws/{WS_A}/status", ts=t0 + 120_000)
+    assert env.status(headers=hdr).status_code == 200
+    env.now = t0 + 240_000
+    assert err(env.status(headers=hdr)) == "replay"
+    env.now = t0 + 240_001
+    assert err(env.status(headers=hdr)) == "stale_timestamp"
+
+
+def test_data_dir_is_tightened_to_0700(tmp_path):
+    d = tmp_path / "loose"
+    d.mkdir(mode=0o755)
+    os.chmod(d, 0o755)
+    create_app(str(d), HOST)
+    assert (os.stat(d).st_mode & 0o777) == 0o700
+
+
+def test_loose_db_file_is_tightened(tmp_path):
+    e = Env(tmp_path)
+    os.chmod(e.path, 0o644)
+    create_app(e.data, HOST)
+    assert (os.stat(e.path).st_mode & 0o777) == 0o600
+
+
+def test_data_dir_that_cannot_be_secured_refuses_to_start(tmp_path, monkeypatch):
+    d = tmp_path / "loose"
+    d.mkdir()
+    os.chmod(d, 0o755)
+    monkeypatch.setattr(os, "chmod", lambda *a, **k: None)
+    with pytest.raises(PermissionError):
+        create_app(str(d), HOST)
+
+
+def test_data_dir_owned_by_someone_else_refuses(tmp_path, monkeypatch):
+    monkeypatch.setattr(os, "getuid", lambda: os.stat(tmp_path).st_uid + 1)
+    with pytest.raises(PermissionError):
+        create_app(str(tmp_path / "x"), HOST)
