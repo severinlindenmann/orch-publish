@@ -54,6 +54,15 @@ def admin(args, out=None):
                         file=out,
                     )
                 return 0
+            if args.action == "allow":
+                conn.execute(
+                    "INSERT OR REPLACE INTO prebinds(workspace_id, person_id, added_ms) VALUES (?,?,?)",
+                    (args.id, args.person, _now()),
+                )
+                print(f"workspace {args.id} may register for owner {args.person}", file=out)
+                return 0
+            if args.action == "unbind":
+                return _unbind(conn, args.id, out)
             status = "blocked" if args.action == "block" else "active"
             n = conn.execute(
                 "UPDATE workspaces SET status=?, updated_ms=? WHERE workspace_id=?",
@@ -68,21 +77,49 @@ def admin(args, out=None):
     return 0
 
 
+def _unbind(conn, ws, out):
+    """Forget a workspace: drop its binding and pre-binding and revoke (tombstone) its shares, in one
+    transaction. Files are removed by the share lifecycle (P2); the tombstone rows stay."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        n = conn.execute("DELETE FROM workspaces WHERE workspace_id=?", (ws,)).rowcount
+        conn.execute("DELETE FROM prebinds WHERE workspace_id=?", (ws,))
+        # nonces are left to expire on their own: a replay after unbind + re-register stays refused.
+        # Every share row (tombstones included) is re-keyed to a value no workspace id can equal, so
+        # a later registration of the same id inherits nothing and owned_share(ws, id) never matches.
+        k = conn.execute(
+            "UPDATE shares SET state='revoked', owner_ws='unbound:'||owner_ws||':'||? WHERE owner_ws=?",
+            (_now(), ws),
+        ).rowcount
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    print(
+        f"workspace {ws} unbound ({k} shares revoked)" if n else f"workspace {ws} was not bound",
+        file=out,
+    )
+    return 0
+
+
 def serve(args):
     import uvicorn
 
     from .app import create_app
 
-    host, _, port = args.api_host.rpartition(":")
-    if host not in LOOPBACK or not port.isdigit():
-        print("serve binds loopback only: --api-host must be 127.0.0.1:PORT", file=sys.stderr)
+    try:
+        host, port = _loopback_port(args.bind, "--bind")
+    except ValueError as e:
+        print(e, file=sys.stderr)
         return 2
-    app = create_app(args.data, args.api_host)
+    # --api-host is what clients sign (it may be a public name when a proxy sits in front); it
+    # defaults to the bind address
+    app = create_app(args.data, args.api_host or args.bind)
     # no access log: request lines carry ids, and the no-logging policy applies (design I15)
     uvicorn.run(
         app,
-        host="127.0.0.1" if host == "localhost" else host.strip("[]"),
-        port=int(port),
+        host=host,
+        port=port,
         access_log=False,
         log_level="warning",
     )
@@ -145,10 +182,22 @@ def dev(args, ready=None):
     if (a_host, a_port) == (s_host, s_port):
         print("--api and --share need different ports (separate origins)", file=sys.stderr)
         return 2
+    pre = []
+    for item in args.workspace or []:
+        ws, _, person = item.partition("=")
+        if not (_ID.fullmatch(ws) and _ID.fullmatch(person)):
+            print("--workspace must be WS=PERSON (32 lower-case hex each)", file=sys.stderr)
+            return 2
+        pre.append((ws, person))
     path = db.prepare_dir(args.data)
     db.init(path)
     conn = db.connect(path)
     try:
+        for ws, person in pre:
+            conn.execute(
+                "INSERT OR REPLACE INTO prebinds(workspace_id, person_id, added_ms) VALUES (?,?,?)",
+                (ws, person, _now()),
+            )
         for person in args.owner or []:
             conn.execute(
                 "INSERT OR IGNORE INTO owners(person_id, added_ms) VALUES (?,?)",
@@ -176,7 +225,8 @@ def main(argv=None):
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("serve", help="run the API on loopback")
     s.add_argument("--data", required=True)
-    s.add_argument("--api-host", default="127.0.0.1:8103", help="host:port clients sign and reach")
+    s.add_argument("--bind", default="127.0.0.1:8103", help="loopback host:port to listen on")
+    s.add_argument("--api-host", default=None, help="host[:port] clients sign (default: --bind)")
     w2 = sub.add_parser("share", help="run the share server (public origin) on loopback")
     w2.add_argument("--data", required=True)
     w2.add_argument("--share-host", default="127.0.0.1:8104")
@@ -185,6 +235,12 @@ def main(argv=None):
     d.add_argument("--api", default="127.0.0.1:8103")
     d.add_argument("--share", default="127.0.0.1:8104")
     d.add_argument("--owner", action="append", type=_id, help="person id to allow (repeatable)")
+    d.add_argument(
+        "--workspace",
+        action="append",
+        metavar="WS=PERSON",
+        help="pre-bind a workspace id to an owner (repeatable; same as admin ws allow)",
+    )
     a = sub.add_parser("admin", help="owner allowlist and blocking")
     a.add_argument("--data", required=True)
     g = a.add_subparsers(dest="group", required=True)
@@ -196,6 +252,12 @@ def main(argv=None):
     for name in ("block", "unblock"):
         w.add_parser(name).add_argument("id", type=_id)
     w.add_parser("list")
+    al = w.add_parser("allow", help="pre-bind a workspace id to an owner so it may register")
+    al.add_argument("id", type=_id)
+    al.add_argument("person", type=_id)
+    w.add_parser("unbind", help="forget a workspace and revoke its shares").add_argument(
+        "id", type=_id
+    )
     args = p.parse_args(argv)
     run = {"serve": serve, "share": share, "dev": dev}.get(args.cmd, admin)
     return run(args)
