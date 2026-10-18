@@ -8,7 +8,7 @@ import time
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from . import auth, db, registry
+from . import auth, db, registry, shares
 from . import relay_proto as proto
 from .auth import Refusal
 
@@ -190,6 +190,7 @@ def create_app(data_dir, api_host, clock=None):
             {"workspace": ws, "card_seq": row["card_seq"], "status": row["status"]}, 200, _HEADERS
         )
 
+    shares.install(app, settings)
     app.add_middleware(SignedRequestMiddleware, settings=settings)
     return app
 

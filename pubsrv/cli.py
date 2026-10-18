@@ -27,7 +27,12 @@ def admin(args, out=None):
     db.init(path)
     conn = db.connect(path)
     try:
-        if args.group == "owners":
+        if args.group == "sweep":
+            from . import sweep
+
+            counts = sweep.run(path, args.data, _now())
+            print(" ".join(f"{k}={v}" for k, v in counts.items()), file=out)
+        elif args.group == "owners":
             if args.action == "add":
                 conn.execute(
                     "INSERT OR IGNORE INTO owners(person_id, added_ms) VALUES (?,?)",
@@ -106,6 +111,7 @@ def main(argv=None):
     for name in ("block", "unblock"):
         w.add_parser(name).add_argument("id", type=_id)
     w.add_parser("list")
+    g.add_parser("sweep", help="expire shares, drop stale uploads and old tombstones")
     args = p.parse_args(argv)
     return serve(args) if args.cmd == "serve" else admin(args)
 

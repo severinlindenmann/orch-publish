@@ -40,9 +40,18 @@ CREATE TABLE IF NOT EXISTS shares(
   state TEXT NOT NULL DEFAULT 'staged' CHECK(state IN ('staged','live','revoked','expired')),
   manifest_hash TEXT,
   bytes INTEGER NOT NULL DEFAULT 0,
-  created_ms INTEGER NOT NULL
+  created_ms INTEGER NOT NULL,
+  ended_ms INTEGER
 );
 CREATE INDEX IF NOT EXISTS shares_owner ON shares(owner_ws);
+CREATE TABLE IF NOT EXISTS share_files(
+  share_id TEXT NOT NULL REFERENCES shares(id),
+  path TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  sha256 TEXT NOT NULL,
+  present INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(share_id, path)
+);
 CREATE TABLE IF NOT EXISTS views(
   view_id TEXT PRIMARY KEY,
   share_id TEXT NOT NULL REFERENCES shares(id),
