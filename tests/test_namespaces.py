@@ -105,3 +105,101 @@ def test_every_share_route_goes_through_owned_share():
     for fn in ("op_put_file", "op_commit", "op_revoke", "op_get"):
         body = src.split(f"def {fn}(")[1].split("\ndef ")[0]
         assert "owned_share(conn, ws, sid)" in body, fn
+
+
+# --- binding re-check inside each write transaction (P1b require_binding) -------------------------
+
+
+def _unbind_after_middleware(two, monkeypatch, how):
+    """Run the real _txn start, but change the workspace's binding first: this is the window between
+    the middleware check and the handler's transaction."""
+    from pubsrv import shares
+
+    real = shares._txn
+    done = []
+
+    def txn(conn, ws, wsk):
+        if not done:
+            done.append(1)
+            if how == "unbind":
+                two.sql("DELETE FROM workspaces WHERE workspace_id=?", WS_A)
+            elif how == "rekey":
+                two.sql("UPDATE workspaces SET wsk_pub='other' WHERE workspace_id=?", WS_A)
+            else:
+                two.sql("UPDATE workspaces SET status='blocked' WHERE workspace_id=?", WS_A)
+        return real(conn, ws, wsk)
+
+    monkeypatch.setattr(shares, "_txn", txn)
+
+
+@pytest.mark.parametrize("how,code", [("unbind", 401), ("rekey", 401), ("block", 403)])
+@pytest.mark.parametrize("op", ["put_meta", "put_file", "commit", "revoke"])
+def test_binding_change_before_the_write_transaction_leaves_no_write(
+    two, monkeypatch, op, how, code
+):
+    sid = os.urandom(16).hex()
+    two.put_meta("a", sid, two.meta({"a.txt": b"one"}))
+    if op in ("commit", "revoke"):
+        two.put_file("a", sid, "a.txt", b"one")
+    new = os.urandom(16).hex()
+    before = (two.sql("SELECT * FROM shares"), two.sql("SELECT * FROM share_files"), two.on_disk())
+    _unbind_after_middleware(two, monkeypatch, how)
+    if op == "put_meta":
+        r = two.put_meta("a", new, two.meta({"b.txt": b"two"}))
+    elif op == "put_file":
+        r = two.put_file("a", sid, "a.txt", b"one")
+        before = (before[0], two.sql("SELECT * FROM share_files"), before[2])
+    elif op == "commit":
+        r = two.req("a", "POST", f"/shares/{sid}/commit")
+    else:
+        r = two.req("a", "DELETE", f"/shares/{sid}")
+    assert r.status_code == code, r.text
+    after = (two.sql("SELECT * FROM shares"), two.sql("SELECT * FROM share_files"), two.on_disk())
+    if op == "put_file":
+        # the file was already present before this request only if it was uploaded earlier
+        assert after[0] == before[0]
+    else:
+        assert [dict(x) for x in after[0]] == [dict(x) for x in before[0]]
+        assert [dict(x) for x in after[1]] == [dict(x) for x in before[1]]
+        assert after[2] == before[2]
+    assert two.row(new) is None
+
+
+def test_put_file_after_unbind_writes_nothing(two, monkeypatch):
+    sid = os.urandom(16).hex()
+    two.put_meta("a", sid, two.meta({"a.txt": b"one"}))
+    _unbind_after_middleware(two, monkeypatch, "unbind")
+    r = two.put_file("a", sid, "a.txt", b"one")
+    assert r.status_code == 401
+    assert two.on_disk() == []
+    assert two.sql("SELECT present FROM share_files")[0]["present"] == 0
+
+
+def test_unbind_keeps_ids_reserved(two):
+    """P1b re-keys the share rows on unbind; their ids stay primary keys, so nobody can re-create them."""
+    from pubsrv import cli
+
+    live = two.share("a")
+    gone = two.share("a")
+    two.req("a", "DELETE", f"/shares/{gone}")
+    r = two.sql("SELECT * FROM workspaces WHERE workspace_id=?", WS_A)[0]
+    saved = (
+        r["workspace_id"], r["wsk_pub"], r["owner_person_id"], r["owner_pk"], r["card_seq"],
+        r["card_json"], r["created_ms"], r["updated_ms"],
+    )  # fmt: skip
+    assert cli.main(["admin", "--data", two.data, "ws", "unbind", WS_A]) == 0
+    assert {two.row(live)["state"], two.row(gone)["state"]} == {"revoked"}
+    assert two.row(live)["token_hash"] == "0" * 64
+    for sid in (live, gone):
+        r = two.put_meta("b", sid, two.meta({"f": b"y"}))
+        assert (r.status_code, err(r)) == (409, "conflict")
+    # a re-registered A (same row back) sees none of them: re-keyed rows never match owned_share
+    two.sql(
+        "INSERT INTO workspaces VALUES (?,?,?,?,?,?,'active',?,?)",
+        *saved,
+    )
+    assert two.req("a", "GET", "/shares").json() == {"shares": []}
+    for sid in (live, gone):
+        assert two.req("a", "GET", f"/shares/{sid}").status_code == 404
+        r = two.put_meta("a", sid, two.meta({"f": b"y"}))
+        assert (r.status_code, err(r)) == (409, "conflict")

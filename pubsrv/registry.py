@@ -48,8 +48,35 @@ def card_key(card, pk, ws_hex):
     return res["ok"]["wsk_pub"]
 
 
+def require_prebound(conn, ws_hex, person_id):
+    """An unknown workspace may register only if the admin pre-bound it to this owner (M2) and the
+    owner is on the allowlist. Every failure is the same 401, whatever the reason (L3)."""
+    ok = (
+        conn.execute(
+            "SELECT 1 FROM prebinds p JOIN owners o ON o.person_id = p.person_id"
+            " WHERE p.workspace_id=? AND p.person_id=?",
+            (ws_hex, person_id),
+        ).fetchone()
+        is not None
+    )
+    if not ok:
+        raise Refusal(401, "unknown_workspace")
+
+
 def get_workspace(conn, ws_hex):
     return conn.execute("SELECT * FROM workspaces WHERE workspace_id=?", (ws_hex,)).fetchone()
+
+
+def require_binding(conn, ws_hex, wsk_pub):
+    """Re-check, on freshly read state, that this workspace is still bound to this key and still
+    admitted. Call it inside any write transaction (P2 handlers) and in the middleware after the body
+    is read: an unbind, re-register or block that happened since the request was admitted refuses it.
+    Returns the fresh row."""
+    row = get_workspace(conn, ws_hex)
+    if row is None or row["wsk_pub"] != wsk_pub:
+        raise Refusal(401, "unknown_workspace")
+    check_admitted(conn, row)
+    return row
 
 
 def check_admitted(conn, row):
@@ -70,6 +97,9 @@ def register(conn, ws_hex, card, pk, now_ms):
     conn.execute("BEGIN IMMEDIATE")
     try:
         row = get_workspace(conn, ws_hex)
+        if row is None:
+            # checked on freshly read state, inside the lock (M2)
+            require_prebound(conn, ws_hex, proto.identifier("person", pk))
         if row is not None:
             check_admitted(conn, row)
             old = json.loads(row["card_json"])

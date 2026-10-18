@@ -244,17 +244,25 @@ class Store:
 # --- operations (sync; run in a thread) ----------------------------------------------------------
 
 
-def _txn(conn):
+def _txn(conn, ws, wsk):
+    """Start a write transaction and, inside it, re-check on fresh state that the workspace is still
+    bound to the key this request was authenticated under (an unbind, re-register or block since the
+    middleware check refuses the write with 401/403)."""
     conn.execute("BEGIN IMMEDIATE")
+    try:
+        return registry.require_binding(conn, ws, wsk)
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
 
 
-def op_put_meta(settings, store, ws, sid, raw):
+def op_put_meta(settings, store, ws, wsk, sid, raw):
     now = settings.clock()
     m, total = parse_meta(raw, now)
     mh = manifest_hash(m)
     conn = db.connect(settings.db_path)
     try:
-        _txn(conn)
+        _txn(conn, ws, wsk)
         try:
             row = conn.execute("SELECT * FROM shares WHERE id=?", (sid,)).fetchone()
             if row is not None:
@@ -301,7 +309,7 @@ def op_put_meta(settings, store, ws, sid, raw):
         conn.close()
 
 
-def op_put_file(settings, store, ws, sid, path, body):
+def op_put_file(settings, store, ws, wsk, sid, path, body):
     conn = db.connect(settings.db_path)
     try:
         row = owned_share(conn, ws, sid)
@@ -324,14 +332,30 @@ def op_put_file(settings, store, ws, sid, path, body):
             raise Refusal(409, "committed")
         if settings.clock() >= row["expires_ms"]:
             raise Refusal(410, "gone", state="expired")
-        store.write_file(sid, path, body)
-        conn.execute("UPDATE share_files SET present=1 WHERE share_id=? AND path=?", (sid, path))
+        # the write happens inside the transaction, after the binding re-check: an unbind since the
+        # middleware check leaves nothing on disk or in the DB
+        _txn(conn, ws, wsk)
+        try:
+            row = owned_share(conn, ws, sid)
+            if row["state"] != "staged":
+                if row["state"] == "live":
+                    raise Refusal(409, "committed")
+                _gone(row)
+            store.write_file(sid, path, body)
+            conn.execute(
+                "UPDATE share_files SET present=1 WHERE share_id=? AND path=?", (sid, path)
+            )
+            conn.execute("COMMIT")
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
         return {"path": path, "result": "stored"}
     finally:
         conn.close()
 
 
-def op_commit(settings, store, ws, sid):
+def op_commit(settings, store, ws, wsk, sid):
     # Verify (read and hash up to 50 MB) BEFORE taking the write lock; inside the transaction only the
     # state and the present flags are re-checked. A file can only ever be rewritten with identical
     # bytes (size and sha256 are pinned by the manifest), so the earlier verification stays true.
@@ -345,7 +369,7 @@ def op_commit(settings, store, ws, sid):
                 ):
                     missing = _missing_verified(conn, store, sid)
                     raise Refusal(409, "incomplete", missing=missing)
-        _txn(conn)
+        _txn(conn, ws, wsk)
         try:
             row = owned_share(conn, ws, sid)
             if row["state"] in ("revoked", "expired"):
@@ -396,10 +420,10 @@ def _missing_verified(conn, store, sid):
     )
 
 
-def op_revoke(settings, store, ws, sid):
+def op_revoke(settings, store, ws, wsk, sid):
     conn = db.connect(settings.db_path)
     try:
-        _txn(conn)
+        _txn(conn, ws, wsk)
         try:
             row = owned_share(conn, ws, sid)
             if row["state"] == "revoked":
@@ -508,35 +532,42 @@ def install(app, settings):
         sid = request.path_params.get("sid")
         if sid is not None and not _ID.fullmatch(sid):
             raise Refusal(404, "not_found")  # indistinguishable from a missing share
-        return ok(await run_in_threadpool(fn, *a, ws))
+        wsk = request.scope.get("orch_wsk")
+        if not wsk:
+            raise Refusal(401, "unknown_workspace")
+        return ok(await run_in_threadpool(fn, ws, wsk, *a))
 
     @router.get("/shares")
     async def list_shares(request: Request):
-        return await guarded(request, lambda ws: op_list(settings, ws), write=False)
+        return await guarded(request, lambda ws, wsk: op_list(settings, ws), write=False)
 
     @router.get("/shares/{sid}")
     async def get_share(sid: str, request: Request):
-        return await guarded(request, lambda ws: op_get(settings, ws, sid), write=False)
+        return await guarded(request, lambda ws, wsk: op_get(settings, ws, sid), write=False)
 
     @router.put("/shares/{sid}")
     async def put_meta(sid: str, request: Request):
         raw = await request.body()
         if len(raw) > MAX_META_BODY:
             raise Refusal(413, "too_large")
-        return await guarded(request, lambda ws: op_put_meta(settings, store, ws, sid, raw))
+        return await guarded(
+            request, lambda ws, wsk: op_put_meta(settings, store, ws, wsk, sid, raw)
+        )
 
     @router.put("/shares/{sid}/files/{fpath:path}")
     async def put_file(sid: str, fpath: str, request: Request):
         body = await request.body()
-        return await guarded(request, lambda ws: op_put_file(settings, store, ws, sid, fpath, body))
+        return await guarded(
+            request, lambda ws, wsk: op_put_file(settings, store, ws, wsk, sid, fpath, body)
+        )
 
     @router.post("/shares/{sid}/commit")
     async def commit(sid: str, request: Request):
-        return await guarded(request, lambda ws: op_commit(settings, store, ws, sid))
+        return await guarded(request, lambda ws, wsk: op_commit(settings, store, ws, wsk, sid))
 
     @router.delete("/shares/{sid}")
     async def revoke(sid: str, request: Request):
-        return await guarded(request, lambda ws: op_revoke(settings, store, ws, sid))
+        return await guarded(request, lambda ws, wsk: op_revoke(settings, store, ws, wsk, sid))
 
     @app.exception_handler(Refusal)
     async def _refusal(request, exc):

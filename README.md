@@ -14,3 +14,10 @@ Status: in development (INT-0026). `host/` comes first.
 ## License
 
 Licensed under the PolyForm Noncommercial License 1.0.0. Commercial use requires a separate license from the author. See [LICENSE](LICENSE).
+
+## pubsrv share server: single worker
+
+`orch-publish share` and `orch-publish dev` run exactly one uvicorn worker (`workers=1`, set explicitly). The
+per-share open limit (30/min) and the per-IP bucket for landing GETs and opens live in process memory; more
+workers would multiply them. The view count itself is atomic in SQLite and does not depend on this. Behind a
+proxy the per-IP bucket sees the proxy's address, so put a per-IP limit in Caddy as well.
