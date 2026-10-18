@@ -27,7 +27,12 @@ def admin(args, out=None):
     db.init(path)
     conn = db.connect(path)
     try:
-        if args.group == "owners":
+        if args.group == "sweep":
+            from . import sweep
+
+            counts = sweep.run(path, args.data, _now())
+            print(" ".join(f"{k}={v}" for k, v in counts.items()), file=out)
+        elif args.group == "owners":
             if args.action == "add":
                 conn.execute(
                     "INSERT OR IGNORE INTO owners(person_id, added_ms) VALUES (?,?)",
@@ -88,8 +93,9 @@ def _unbind(conn, ws, out):
         # Every share row (tombstones included) is re-keyed to a value no workspace id can equal, so
         # a later registration of the same id inherits nothing and owned_share(ws, id) never matches.
         k = conn.execute(
-            "UPDATE shares SET state='revoked', owner_ws='unbound:'||owner_ws||':'||? WHERE owner_ws=?",
-            (_now(), ws),
+            "UPDATE shares SET state='revoked', owner_ws='unbound:'||owner_ws||':'||?,"
+            " ended_ms=?, token_hash=? WHERE owner_ws=?",
+            (_now(), _now(), "0" * 64, ws),
         ).rowcount
         conn.execute("COMMIT")
     except BaseException:
@@ -252,6 +258,7 @@ def main(argv=None):
     for name in ("block", "unblock"):
         w.add_parser(name).add_argument("id", type=_id)
     w.add_parser("list")
+    g.add_parser("sweep", help="expire shares, drop stale uploads and old tombstones")
     al = w.add_parser("allow", help="pre-bind a workspace id to an owner so it may register")
     al.add_argument("id", type=_id)
     al.add_argument("person", type=_id)

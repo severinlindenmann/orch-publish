@@ -8,7 +8,7 @@ import time
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from . import auth, db, registry
+from . import auth, db, registry, shares
 from . import relay_proto as proto
 from .auth import Refusal
 
@@ -92,6 +92,7 @@ class SignedRequestMiddleware:
                 raise _TooLarge
             body = await _read_body(receive, ctx.limit)
             scope["orch_ws"] = self._verify(ctx, body)
+            scope["orch_wsk"] = ctx.row["wsk_pub"] if ctx.row is not None else None
         except _TooLarge:
             return await _respond(send, Refusal(413, "too_large"))
         except ConnectionError:
@@ -220,6 +221,7 @@ def create_app(data_dir, api_host, clock=None):
             {"workspace": ws, "card_seq": row["card_seq"], "status": row["status"]}, 200, _HEADERS
         )
 
+    shares.install(app, settings)
     app.add_middleware(SignedRequestMiddleware, settings=settings)
     return app
 
