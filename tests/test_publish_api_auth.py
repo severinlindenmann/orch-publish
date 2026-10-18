@@ -759,7 +759,8 @@ def test_admin_ws_allow_and_unbind(tmp_path):
         WS_A,
     )
     assert cli.main(["admin", "--data", d, "ws", "unbind", WS_A]) == 0
-    assert e.sql("SELECT state FROM shares WHERE id='s1'")[0][0] == "revoked"  # tombstone kept
+    row = e.sql("SELECT state, owner_ws FROM shares WHERE id='s1'")[0]
+    assert row[0] == "revoked" and row[1].startswith("unbound:" + WS_A)  # tombstone kept, re-keyed
     assert e.sql("SELECT COUNT(*) FROM workspaces")[0][0] == 0
     assert e.sql("SELECT COUNT(*) FROM prebinds")[0][0] == 0
     assert err(e.status()) == "unknown_workspace"
@@ -825,3 +826,124 @@ def test_data_dir_owned_by_someone_else_refuses(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "getuid", lambda: os.stat(tmp_path).st_uid + 1)
     with pytest.raises(PermissionError):
         create_app(str(tmp_path / "x"), HOST)
+
+
+# --- P1b delta: unbind racing a live request, tombstones, nonces ---------------------------------
+
+
+def _unbind_during_body(env, mutate, chunks=3):
+    """Admit the headers, then run `mutate()` while the body arrives in delayed chunks."""
+    import asyncio
+
+    body = b"x" * 30
+    path = f"/v1/ws/{WS_A}/x"
+    hdr = sign_headers(env.wsk, WS_A, "POST", HOST, path, body)
+    k = len(body) // chunks
+    parts = [body[i * k : (i + 1) * k] for i in range(chunks - 1)] + [body[(chunks - 1) * k :]]
+    state = {"i": 0}
+    out = []
+    reached = []
+
+    async def receive():
+        i = state["i"]
+        state["i"] += 1
+        await asyncio.sleep(0)
+        if i == 1:
+            mutate()
+        return {"type": "http.request", "body": parts[i], "more_body": i < len(parts) - 1}
+
+    async def send(m):
+        out.append(m)
+
+    async def inner(scope, receive, send):
+        reached.append(1)
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    from pubsrv.app import SignedRequestMiddleware
+
+    mw = SignedRequestMiddleware(inner, env.app.state.settings)
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "headers": [(k.lower().encode(), v.encode()) for k, v in hdr.items()],
+    }
+    asyncio.run(mw(scope, receive, send))
+    return reached, out[0]["status"], out[1]["body"]
+
+
+def test_unbind_between_admission_and_body_refuses(env):
+    reached, status, body = _unbind_during_body(
+        env, lambda: cli.main(["admin", "--data", env.data, "ws", "unbind", WS_A])
+    )
+    assert (reached, status) == ([], 401) and b"unknown_workspace" in body
+
+
+def test_block_between_admission_and_body_refuses(env):
+    reached, status, body = _unbind_during_body(
+        env, lambda: cli.main(["admin", "--data", env.data, "ws", "block", WS_A])
+    )
+    assert (reached, status) == ([], 403) and b"workspace_blocked" in body
+
+
+def test_unbind_and_reregister_with_new_card_between_admission_and_body_refuses(env):
+    def swap():
+        cli.main(["admin", "--data", env.data, "ws", "unbind", WS_A])
+        env.sql(
+            "INSERT INTO workspaces(workspace_id, wsk_pub, owner_person_id, owner_pk, card_seq,"
+            " card_json, created_ms, updated_ms) VALUES (?,?,?,?,?,?,?,?)",
+            (WS_A, "another-key", PERSON, PK_B64, 1, "{}", NOW, NOW),
+        )
+
+    reached, status, _ = _unbind_during_body(env, swap)
+    assert (reached, status) == ([], 401)
+
+
+def test_untouched_binding_still_passes_the_recheck(env):
+    reached, status, _ = _unbind_during_body(env, lambda: None)
+    assert (reached, status) == ([1], 200)
+
+
+def test_require_binding_helper(env):
+    from pubsrv import registry
+
+    conn = db.connect(env.path)
+    try:
+        wsk = CARD1["o"]["wsk_pub"]
+        assert registry.require_binding(conn, WS_A, wsk)["workspace_id"] == WS_A
+        with pytest.raises(auth.Refusal) as x:
+            registry.require_binding(conn, WS_A, "other-key")
+        assert x.value.error == "unknown_workspace"
+        env.sql("UPDATE workspaces SET status='blocked'")
+        with pytest.raises(auth.Refusal) as x:
+            registry.require_binding(conn, WS_A, wsk)
+        assert x.value.error == "workspace_blocked"
+    finally:
+        conn.close()
+
+
+def test_reregister_after_unbind_does_not_see_old_tombstones(env):
+    env.sql(
+        "INSERT INTO shares(id, owner_ws, ticket, kind, token_hash, expires_ms, state, created_ms)"
+        " VALUES ('old', ?, 'T-1', 'secret', 'h', 1, 'live', 1)",
+        WS_A,
+    )
+    assert cli.main(["admin", "--data", env.data, "ws", "unbind", WS_A]) == 0
+    assert cli.main(["admin", "--data", env.data, "ws", "allow", WS_A, PERSON]) == 0
+    assert env.register().status_code == 200
+    assert env.sql("SELECT COUNT(*) FROM shares WHERE owner_ws=?", WS_A)[0][0] == 0
+    assert env.sql("SELECT state FROM shares WHERE id='old'")[0][0] == "revoked"
+
+
+def test_unbind_keeps_nonces_so_a_replay_after_reregister_is_refused(env):
+    hdr = sign_headers(env.wsk, WS_A, "GET", HOST, f"/v1/ws/{WS_A}/status")
+    assert env.status(headers=hdr).status_code == 200
+    n = env.sql("SELECT COUNT(*) FROM nonces WHERE ws=?", WS_A)[0][0]
+    cli.main(["admin", "--data", env.data, "ws", "unbind", WS_A])
+    assert env.sql("SELECT COUNT(*) FROM nonces WHERE ws=?", WS_A)[0][0] == n
+    cli.main(["admin", "--data", env.data, "ws", "allow", WS_A, PERSON])
+    assert env.register().status_code == 200
+    assert err(env.status(headers=hdr)) == "replay"

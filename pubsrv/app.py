@@ -171,7 +171,9 @@ class SignedRequestMiddleware:
             auth.step4_signature(c.cred, wsk, c.method, s.api_host, c.target, body)  # 4
             auth.step5_nonce(c.cred, auth.DbNonces(conn), c.now)  # 5 (L2: before policy refusals)
             if c.row is not None:
-                registry.check_admitted(conn, c.row)  # blocked / owner off the allowlist
+                # the row was read before the (awaited) body read: re-read it now, so an unbind,
+                # re-register or block in between refuses this request
+                registry.require_binding(conn, c.ws_hex, c.row["wsk_pub"])
             if c.m is not None and c.m.group(1) != c.ws_hex:
                 raise Refusal(403, "wrong_workspace")  # I3: the path workspace is the signed one
             if c.m is None:

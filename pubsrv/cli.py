@@ -84,9 +84,12 @@ def _unbind(conn, ws, out):
     try:
         n = conn.execute("DELETE FROM workspaces WHERE workspace_id=?", (ws,)).rowcount
         conn.execute("DELETE FROM prebinds WHERE workspace_id=?", (ws,))
-        conn.execute("DELETE FROM nonces WHERE ws=?", (ws,))
+        # nonces are left to expire on their own: a replay after unbind + re-register stays refused.
+        # Every share row (tombstones included) is re-keyed to a value no workspace id can equal, so
+        # a later registration of the same id inherits nothing and owned_share(ws, id) never matches.
         k = conn.execute(
-            "UPDATE shares SET state='revoked' WHERE owner_ws=? AND state!='revoked'", (ws,)
+            "UPDATE shares SET state='revoked', owner_ws='unbound:'||owner_ws||':'||? WHERE owner_ws=?",
+            (_now(), ws),
         ).rowcount
         conn.execute("COMMIT")
     except BaseException:

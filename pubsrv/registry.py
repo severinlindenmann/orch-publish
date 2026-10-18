@@ -67,6 +67,18 @@ def get_workspace(conn, ws_hex):
     return conn.execute("SELECT * FROM workspaces WHERE workspace_id=?", (ws_hex,)).fetchone()
 
 
+def require_binding(conn, ws_hex, wsk_pub):
+    """Re-check, on freshly read state, that this workspace is still bound to this key and still
+    admitted. Call it inside any write transaction (P2 handlers) and in the middleware after the body
+    is read: an unbind, re-register or block that happened since the request was admitted refuses it.
+    Returns the fresh row."""
+    row = get_workspace(conn, ws_hex)
+    if row is None or row["wsk_pub"] != wsk_pub:
+        raise Refusal(401, "unknown_workspace")
+    check_admitted(conn, row)
+    return row
+
+
 def check_admitted(conn, row):
     """Policy for an authenticated, known workspace; evaluated on every request from the DB row,
     with no cache in front, so a block or an allowlist removal bites on the very next request."""
