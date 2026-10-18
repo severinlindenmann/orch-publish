@@ -154,6 +154,9 @@ def _bad(two, **change):
         ({"expires_ms": "9" * 3}, "bad_expiry"),
         ({"token_hash": "abc"}, "bad_token_hash"),
         ({"token_hash": "A" * 64}, "bad_token_hash"),
+        ({"token_hash": "\u00e9" * 64}, "bad_token_hash"),  # non-ASCII
+        ({"token_hash": "a" * 63 + "\u0661"}, "bad_token_hash"),  # Arabic-indic digit
+        ({"token_hash": "a" * 64 + "\n"}, "bad_token_hash"),
         ({"files": []}, "bad_files"),
         ({"files": "x"}, "bad_files"),
     ],
