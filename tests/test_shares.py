@@ -427,7 +427,20 @@ def test_nothing_secret_is_logged(two, caplog):
 # --- sweep ---------------------------------------------------------------------------------------
 
 
-def test_sweep_expires_cleans_and_drops_tombstones(two):
+def _age(two):
+    """Make every entry under incoming/ and shares/ older than the sweep's minimum age."""
+    old = two.now / 1000 - 3600
+    for top in ("incoming", "shares"):
+        base = pathlib.Path(two.data, top)
+        for p in base.iterdir():
+            os.utime(p, (old, old), follow_symlinks=False)
+
+
+def _sweep(two):
+    return sweep.run(two.app.state.settings.db_path, two.data, two.now)
+
+
+def test_sweep_expires_cleans_and_trims_tombstones(two):
     live = two.share("a", days=1)
     keep = two.share("a", days=7)
     stale = os.urandom(16).hex()
@@ -443,9 +456,11 @@ def test_sweep_expires_cleans_and_drops_tombstones(two):
 
     two.now += 2 * DAY  # share `live` has expired; `stale` is a day old
     two.sql("UPDATE shares SET created_ms=? WHERE id=?", two.now - 7 * 3600_000, stale)
-    counts = sweep.run(two.app.state.settings.db_path, two.data, two.now)
+    _age(two)
+    counts = _sweep(two)
     assert counts == {"expired": 1, "stale_staged": 1, "tombstones_dropped": 0, "orphans": 4}
     assert two.row(live)["state"] == "expired" and two.row(stale)["state"] == "expired"
+    assert two.row(live)["token_hash"] == "0" * 64 == two.row(stale)["token_hash"]
     assert two.row(keep)["state"] == "live"
     assert not link.is_symlink() and os.path.isdir("/tmp")  # the link is removed, never followed
     assert not pathlib.Path(two.data, "shares", live).exists()
@@ -453,12 +468,74 @@ def test_sweep_expires_cleans_and_drops_tombstones(two):
     assert not orphan.exists()
 
     two.now += 31 * DAY
-    counts = sweep.run(two.app.state.settings.db_path, two.data, two.now)
+    counts = _sweep(two)
     assert counts["tombstones_dropped"] == 3 and counts["expired"] == 1  # `keep` ran out too
-    assert (
-        two.row(revoked) is None
-        and two.sql("SELECT * FROM share_files WHERE share_id=?", revoked) == []
-    )
+    # the rows stay forever; only the file lists are trimmed
+    assert two.row(revoked)["state"] == "revoked"
+    assert two.sql("SELECT * FROM share_files WHERE share_id=?", revoked) == []
+
+
+def test_swept_tombstone_id_cannot_be_recreated_by_another_workspace(two):
+    sid = two.share("a")
+    two.req("a", "DELETE", f"/shares/{sid}")
+    two.now += 40 * DAY
+    _sweep(two)
+    _sweep(two)
+    r = two.put_meta("b", sid, two.meta({"f": b"y"}))
+    assert (r.status_code, err(r)) == (409, "conflict")
+    r = two.put_meta("a", sid, two.meta({"f": b"y"}))
+    assert (r.status_code, err(r)) == (410, "gone")
+    assert two.row(sid)["owner_ws"] == WS_A
+
+
+def test_sweep_skips_young_entries(two):
+    young = pathlib.Path(two.data, "shares", "d" * 32, "files")
+    young.mkdir(parents=True)
+    old = pathlib.Path(two.data, "shares", "c" * 32)
+    old.mkdir()
+    t = two.now / 1000
+    os.utime(young.parent, (t - 60, t - 60))
+    os.utime(old, (t - 3600, t - 3600))
+    assert _sweep(two)["orphans"] == 1
+    assert young.is_dir() and not old.exists()
+
+
+def test_sweep_race_commit_between_listing_and_db_read(two, monkeypatch):
+    """A share committed after the sweep listed the directories must keep its files."""
+    sid = os.urandom(16).hex()
+    two.put_meta("a", sid, two.meta({"a.txt": b"one"}))
+    two.put_file("a", sid, "a.txt", b"one")
+    _age(two)
+    real = sweep._list
+
+    def list_then_commit(base):
+        out = real(base)
+        if base.endswith("incoming") and not pathlib.Path(two.data, "shares", sid).exists():
+            assert two.req("a", "POST", f"/shares/{sid}/commit").status_code == 200
+        return out
+
+    monkeypatch.setattr(sweep, "_list", list_then_commit)
+    _sweep(two)
+    # listed incoming/<sid> (staged then), but by removal time the DB says live: kept, not removed
+    assert pathlib.Path(two.data, "shares", sid, "files/a.txt").read_bytes() == b"one"
+    assert two.row(sid)["state"] == "live"
+
+
+def test_sweep_race_new_share_after_listing(two, monkeypatch):
+    """A staged share created after the listing is not a candidate at all."""
+    real = sweep._list
+    made = []
+
+    def list_then_create(base):
+        out = real(base)
+        if base.endswith("incoming") and not made:
+            made.append(two.share("a", commit=False))
+        return out
+
+    monkeypatch.setattr(sweep, "_list", list_then_create)
+    _age(two)
+    _sweep(two)
+    assert pathlib.Path(two.data, "incoming", made[0], "files/index.html").exists()
 
 
 def test_admin_sweep_command(two, capsys):

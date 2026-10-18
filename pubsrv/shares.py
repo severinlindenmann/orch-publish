@@ -3,6 +3,14 @@
 Namespace isolation (I3): every route reads the workspace from the signed request (scope["orch_ws"],
 set by the middleware) and reaches a share only through `owned_share`. A foreign id looks exactly like a
 missing one (404). Nothing in this module trusts a workspace taken from the URL.
+
+Known and accepted: creating an id that belongs to another workspace answers 409, which reveals that
+the id exists. Ids are 128-bit random, so this cannot be used to enumerate. Share ids are never freed.
+The write rate limiter is in memory: run the API as a single worker process (as the share server).
+
+Known and accepted: creating an id that belongs to another workspace answers 409, which reveals that
+the id exists. Ids are 128-bit random, so this cannot be used to enumerate. Share ids are never freed.
+The write rate limiter is in memory: run the API as a single worker process (as the share server).
 """
 
 import hashlib
@@ -324,8 +332,19 @@ def op_put_file(settings, store, ws, sid, path, body):
 
 
 def op_commit(settings, store, ws, sid):
+    # Verify (read and hash up to 50 MB) BEFORE taking the write lock; inside the transaction only the
+    # state and the present flags are re-checked. A file can only ever be rewritten with identical
+    # bytes (size and sha256 are pinned by the manifest), so the earlier verification stays true.
     conn = db.connect(settings.db_path)
     try:
+        row = owned_share(conn, ws, sid)
+        if row["state"] == "staged":
+            for f in conn.execute("SELECT * FROM share_files WHERE share_id=?", (sid,)).fetchall():
+                if not f["present"] or not store.verify_file(
+                    "incoming", sid, f["path"], f["size"], f["sha256"]
+                ):
+                    missing = _missing(conn, store, sid)
+                    raise Refusal(409, "incomplete", missing=missing)
         _txn(conn)
         try:
             row = owned_share(conn, ws, sid)
@@ -336,15 +355,10 @@ def op_commit(settings, store, ws, sid):
                 return {"id": sid, "state": "live", "result": "unchanged"}
             if settings.clock() >= row["expires_ms"]:
                 raise Refusal(410, "gone", state="expired")
-            files = conn.execute("SELECT * FROM share_files WHERE share_id=?", (sid,)).fetchall()
-            missing = [
-                f["path"]
-                for f in files
-                if not f["present"]
-                or not store.verify_file("incoming", sid, f["path"], f["size"], f["sha256"])
-            ]
-            if missing:
-                raise Refusal(409, "incomplete", missing=sorted(missing))
+            if conn.execute(
+                "SELECT 1 FROM share_files WHERE share_id=? AND present=0", (sid,)
+            ).fetchone():
+                raise Refusal(409, "incomplete", missing=_missing(conn, store, sid))
             store.go_live(sid)
             try:
                 conn.execute("UPDATE shares SET state='live' WHERE id=?", (sid,))
@@ -363,6 +377,15 @@ def op_commit(settings, store, ws, sid):
         return {"id": sid, "state": "live", "result": "committed"}
     finally:
         conn.close()
+
+
+def _missing(conn, store, sid):
+    return sorted(
+        f["path"]
+        for f in conn.execute("SELECT * FROM share_files WHERE share_id=?", (sid,))
+        if not f["present"]
+        or not store.verify_file("incoming", sid, f["path"], f["size"], f["sha256"])
+    )
 
 
 def op_revoke(settings, store, ws, sid):
