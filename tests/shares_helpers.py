@@ -32,12 +32,11 @@ class Two(Env):
         )
         self.sql("INSERT OR IGNORE INTO owners VALUES (?,?)", BOB, self.now)
         self.sql(
-            "INSERT INTO workspaces VALUES (?,?,?,?,?,?,'active',?,?)",
+            "INSERT INTO workspaces VALUES (?,?,?,?,?,'active',?,?)",
             WS_B,
             proto.b64u(pub),
             BOB,
             "",
-            1,
             "{}",
             self.now,
             self.now,

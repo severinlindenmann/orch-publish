@@ -164,11 +164,12 @@ class SignedRequestMiddleware:
                     "wsk_pub"
                 ]  # 3: a known workspace is checked against the stored key only
             else:
-                card, pk = registry.parse_register_body(body)
+                delegation, pk = registry.parse_register_body(body)
                 # L3: cheap admission test first; the same 401 whatever the reason, so the answer
                 # does not reveal which owners or workspaces are known
                 registry.require_prebound(conn, c.ws_hex, proto.identifier("person", pk))
-                wsk = registry.card_key(card, pk, c.ws_hex)  # 3: the self-presented card
+                # 3: the key is the one the owner's signed delegation names (design 2.6b)
+                wsk = registry.delegation_key(delegation, pk, c.ws_hex, c.m.group(1))
             auth.step4_signature(c.cred, wsk, c.method, s.api_host, c.target, body)  # 4
             auth.step5_nonce(c.cred, auth.DbNonces(conn), c.now)  # 5 (L2: before policy refusals)
             if c.row is not None:
@@ -196,17 +197,17 @@ def create_app(data_dir, api_host, clock=None):
         if len(raw) > MAX_REGISTER_BODY:
             return JSONResponse({"error": "too_large"}, 413, _HEADERS)
         try:
-            card, pk = registry.parse_register_body(raw)
+            delegation, pk = registry.parse_register_body(raw)
             conn = db.connect(settings.db_path)
             try:
-                outcome, seq = registry.register(conn, ws, card, pk, settings.clock())
+                outcome = registry.register(conn, ws, delegation, pk, settings.clock())
             finally:
                 conn.close()
         except Refusal as r:
             return JSONResponse(r.body(), r.status, _HEADERS)
         except (sqlite3.Error, OSError):
             return JSONResponse({"error": "unavailable"}, 503, _HEADERS)
-        return JSONResponse({"workspace": ws, "result": outcome, "card_seq": seq}, 200, _HEADERS)
+        return JSONResponse({"workspace": ws, "result": outcome}, 200, _HEADERS)
 
     @app.get("/v1/ws/{ws}/status")
     async def status(ws: str):
@@ -217,9 +218,7 @@ def create_app(data_dir, api_host, clock=None):
             conn.close()
         if row is None:  # unbound between the middleware and this handler
             return JSONResponse({"error": "unknown_workspace"}, 401, _HEADERS)
-        return JSONResponse(
-            {"workspace": ws, "card_seq": row["card_seq"], "status": row["status"]}, 200, _HEADERS
-        )
+        return JSONResponse({"workspace": ws, "status": row["status"]}, 200, _HEADERS)
 
     shares.install(app, settings)
     app.add_middleware(SignedRequestMiddleware, settings=settings)

@@ -50,12 +50,11 @@ def admin(args, out=None):
         else:
             if args.action == "list":
                 for r in conn.execute(
-                    "SELECT workspace_id, owner_person_id, card_seq, status FROM workspaces"
+                    "SELECT workspace_id, owner_person_id, status FROM workspaces"
                     " ORDER BY created_ms"
                 ):
                     print(
-                        f"{r['workspace_id']} owner={r['owner_person_id']} seq={r['card_seq']}"
-                        f" {r['status']}",
+                        f"{r['workspace_id']} owner={r['owner_person_id']} {r['status']}",
                         file=out,
                     )
                 return 0
@@ -267,7 +266,11 @@ def main(argv=None):
     )
     args = p.parse_args(argv)
     run = {"serve": serve, "share": share, "dev": dev}.get(args.cmd, admin)
-    return run(args)
+    try:
+        return run(args)
+    except db.SchemaError as e:
+        print(e, file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

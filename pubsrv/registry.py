@@ -1,6 +1,5 @@
-"""Workspace admission (design section 2.6): the self-presented card, the owner allowlist, block."""
+"""Workspace admission (design 2.6b): the self-presented delegation, the owner allowlist, block."""
 
-import json
 import sqlite3
 
 from . import relay_proto as proto
@@ -8,25 +7,15 @@ from .auth import Refusal
 
 ID32 = r"[0-9a-f]{32}"
 
-# card refusal -> HTTP status; anything unlisted is 400
-_CARD_STATUS = {
-    "stale_card": 409,
-    "wsk_changed": 409,
-    "delegation_changed": 409,
-    "other_workspace": 409,
-    "bad_wxk_version": 409,
-    "wxk_changed_without_version": 409,
-}
-
 
 def parse_register_body(raw):
-    """Strict body: exactly {card, owner_pk}. Returns (card, owner_pk_bytes)."""
+    """Strict body: exactly {delegation, owner_pk}. Returns (delegation, owner_pk_bytes)."""
     try:
         body = proto.parse_json(raw)
         if (
             not isinstance(body, dict)
-            or set(body) != {"card", "owner_pk"}
-            or not isinstance(body["card"], dict)
+            or set(body) != {"delegation", "owner_pk"}
+            or not isinstance(body["delegation"], dict)
         ):
             raise ValueError("shape")
         pk = proto.unb64u(body["owner_pk"], 65)
@@ -34,18 +23,25 @@ def parse_register_body(raw):
             raise ValueError("pk")
     except (ValueError, TypeError):
         raise Refusal(400, "malformed") from None
-    return body["card"], pk
+    return body["delegation"], pk
 
 
-def card_key(card, pk, ws_hex):
-    """For an unknown workspace: the wsk_pub the request signature must verify under. Only a card
-    that verifies end to end (delegation by the owner PK, card by the WSK) is trusted for that."""
-    res = proto.verify_card(card, pk)
+def check_delegation(delegation, pk, ws_hex, path_ws=None):
+    """Design 2.6b steps 1-2: the owner PK signed this delegation, it names this owner, and it is
+    for exactly this workspace (the signed Orch-Workspace and, when given, the path). Returns the
+    signed object `o`."""
+    res = proto.verify_delegation(delegation, pk)
     if "refuse" in res:
-        raise Refusal(400, "card_refused", reason=res["refuse"])
-    if res["ok"]["workspace_id"] != ws_hex:
-        raise Refusal(400, "card_refused", reason="other_workspace")
-    return res["ok"]["wsk_pub"]
+        raise Refusal(400, "delegation_refused", reason=res["refuse"])
+    o = res["ok"]
+    if o["workspace_id"] != ws_hex or (path_ws is not None and path_ws != ws_hex):
+        raise Refusal(400, "other_workspace")
+    return o
+
+
+def delegation_key(delegation, pk, ws_hex, path_ws):
+    """For an unknown workspace: the wsk_pub the request signature must verify under (step 3)."""
+    return check_delegation(delegation, pk, ws_hex, path_ws)["wsk_pub"]
 
 
 def require_prebound(conn, ws_hex, person_id):
@@ -91,63 +87,40 @@ def check_admitted(conn, row):
         raise Refusal(403, "owner_not_allowed")
 
 
-def register(conn, ws_hex, card, pk, now_ms):
-    """Bind or update a workspace. Everything is decided inside one BEGIN IMMEDIATE transaction on
-    freshly read state. Returns "registered" | "updated" | "unchanged"."""
+def register(conn, ws_hex, delegation, pk, now_ms):
+    """Bind a workspace to its genesis delegation (design 2.6b). Everything is decided inside one
+    BEGIN IMMEDIATE transaction on freshly read state. The binding is permanent: a byte-identical
+    delegation is "unchanged", any other one is 409 delegation_changed; only an admin unbind
+    releases it. Returns "registered" | "unchanged"."""
+    o = check_delegation(delegation, pk, ws_hex, ws_hex)
+    blob = proto.cj(delegation).decode()
     conn.execute("BEGIN IMMEDIATE")
     try:
         row = get_workspace(conn, ws_hex)
         if row is None:
             # checked on freshly read state, inside the lock (M2)
-            require_prebound(conn, ws_hex, proto.identifier("person", pk))
-        if row is not None:
-            check_admitted(conn, row)
-            old = json.loads(row["card_json"])
-            stored = {"o": old["o"], "delegation": old["delegation"]["o"]}
-        else:
-            stored = None
-        res = proto.relay_accept_card(stored, card, pk)
-        if "refuse" in res:
-            raise Refusal(
-                _CARD_STATUS.get(res["refuse"], 400), "card_refused", reason=res["refuse"]
-            )
-        o = res["ok"]
-        if o["workspace_id"] != ws_hex:
-            raise Refusal(400, "card_refused", reason="other_workspace")
-        if (
+            require_prebound(conn, ws_hex, o["owner_person_id"])
+            if (
+                conn.execute(
+                    "SELECT 1 FROM owners WHERE person_id=?", (o["owner_person_id"],)
+                ).fetchone()
+                is None
+            ):
+                raise Refusal(401, "unknown_workspace")
             conn.execute(
-                "SELECT 1 FROM owners WHERE person_id=?", (o["owner_person_id"],)
-            ).fetchone()
-            is None
-        ):
-            raise Refusal(403, "owner_not_allowed")
-        blob = json.dumps(card, sort_keys=True, separators=(",", ":"))
-        if row is None:
-            conn.execute(
-                "INSERT INTO workspaces(workspace_id, wsk_pub, owner_person_id, owner_pk, card_seq,"
-                " card_json, status, created_ms, updated_ms) VALUES (?,?,?,?,?,?,'active',?,?)",
-                (
-                    ws_hex,
-                    o["wsk_pub"],
-                    o["owner_person_id"],
-                    proto.b64u(pk),
-                    o["card_seq"],
-                    blob,
-                    now_ms,
-                    now_ms,
-                ),
+                "INSERT INTO workspaces(workspace_id, wsk_pub, owner_person_id, owner_pk,"
+                " delegation_json, status, created_ms, updated_ms)"
+                " VALUES (?,?,?,?,?,'active',?,?)",
+                (ws_hex, o["wsk_pub"], o["owner_person_id"], proto.b64u(pk), blob, now_ms, now_ms),
             )
             outcome = "registered"
-        elif o == stored["o"]:
-            outcome = "unchanged"
         else:
-            conn.execute(
-                "UPDATE workspaces SET card_seq=?, card_json=?, updated_ms=? WHERE workspace_id=?",
-                (o["card_seq"], blob, now_ms, ws_hex),
-            )
-            outcome = "updated"
+            check_admitted(conn, row)
+            if row["delegation_json"] != blob:
+                raise Refusal(409, "delegation_changed")
+            outcome = "unchanged"
         conn.execute("COMMIT")
-        return outcome, o["card_seq"]
+        return outcome
     except BaseException:
         try:
             conn.execute("ROLLBACK")
