@@ -121,8 +121,6 @@ def _admin_read(scope, settings):
             conn, hub if re.fullmatch(r"[0-9a-f]{32}", hub) else "0" * 32, now, settings.dev_mode
         )
         res = R.check_admin_read(req, st, now)
-        if target.partition("?")[0] != RELEASES or R.query_keys(target) - {"workspace"}:
-            raise H.Refused("malformed")  # signed and canonical, but not a form this route serves
         return R.list_releases(conn, res["workspaces"], now, res["named"])
     finally:
         conn.close()

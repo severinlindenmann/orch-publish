@@ -127,7 +127,7 @@ def test_vector(case):
 
 
 def test_every_relevant_case_is_run():
-    assert len(CASES) == 17 + 25 + 26 + 4 + 6 + 3 + 42 + 2 + 5
+    assert len(CASES) == 17 + 25 + 26 + 4 + 6 + 3 + 48 + 2 + 5
 
 
 def test_labels_match_the_contract():

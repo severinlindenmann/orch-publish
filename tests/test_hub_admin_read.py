@@ -166,3 +166,75 @@ def test_rows_outside_scope_are_never_emitted(env):
     finally:
         c.close()
     assert [x["workspace_id"] for x in read(env, hub).json()["releases"]] == [WS_A]
+
+
+# --- the contract vectors through the REAL route ------------------------------------------------------------------
+
+import json
+import pathlib
+
+from pubsrv import db
+
+_VEC = json.loads((pathlib.Path(__file__).parent / "vectors/vectors_hub.json").read_text())
+_ROUTE_CASES = [
+    c
+    for c in _VEC["cases"]
+    if c["check"] == "admin_read"
+    and c["args"]["request"]["target"].partition("?")[0] == R.ROUTE
+    and c["args"]["request"]["method"] in ("GET", "HEAD")
+    and "#" not in c["args"]["request"]["target"]
+]
+
+
+def test_route_cases_are_most_of_them():
+    assert len(_ROUTE_CASES) >= 30
+
+
+@pytest.mark.parametrize("case", _ROUTE_CASES, ids=lambda c: c["name"])
+def test_vector_through_the_route(case, tmp_path):
+    a = case["args"]
+    e = Env(tmp_path)
+    e.now = a["now_ms"]
+    e.app.state.settings.dev_mode = (
+        True  # stored with the dev marker; flipped below for the real-verifier case
+    )
+    conn = db.connect(e.path)
+    try:
+        for ws, card in a["cards"].items():
+            conn.execute(
+                "INSERT INTO workspaces(workspace_id, wsk_pub, owner_person_id, owner_pk, delegation_json,"
+                " created_ms, updated_ms) VALUES (?,?,?,?,?,0,0)",
+                (ws, card["wsk_pub"], card["owner_person_id"], "pk", "{}"),
+            )
+            conn.execute(
+                "INSERT INTO shares(id, owner_ws, ticket, kind, token_hash, expires_ms, state, bytes, created_ms)"
+                " VALUES (?,?,?,?,?,?,?,?,?)",
+                (ws[:30] + "00", ws, SECRETS[0], "secret", SECRETS[1], 2**50, "live", 1, 1),
+            )
+        H.accept_hub_card(conn, a["hub_card"], a["now_ms"], True)
+        for ws, steps in a.get("bindings", {}).items():
+            for st in steps:
+                if "binding" in st:
+                    H.accept_binding(conn, ws, st["binding"], a["now_ms"], True)
+                else:
+                    H.accept_unbound(conn, ws, st["unbound"], a["now_ms"], True)
+        for cert in a.get("revoked_op_certs", []):
+            conn.execute(
+                "INSERT INTO hub_op_revoked VALUES (?,?,?)", (a["hub_id"], cert, a["now_ms"])
+            )
+    finally:
+        conn.close()
+    e.app.state.settings.dev_mode = a.get("dev_mode", True)
+    r = e.c.request(a["request"]["method"], a["request"]["target"], headers=a["request"]["headers"])
+    if "error" in case["expect"]:
+        code = case["expect"]["error"]
+        assert r.status_code == H.STATUS.get(code, 400)
+        if a["request"]["method"] == "GET":  # a HEAD response has no body
+            assert r.json()["error"] == code
+        return
+    assert r.status_code == 200
+    if a["request"]["method"] == "GET":
+        want = case["expect"]["ok"]["workspaces"]
+        named = a["request"]["target"].partition("workspace=")[2]
+        got = sorted(x["workspace_id"] for x in r.json()["releases"])
+        assert got == (want if not named else [w for w in want if w == named])

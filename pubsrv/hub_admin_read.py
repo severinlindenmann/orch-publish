@@ -16,9 +16,6 @@ from . import relay_proto as proto
 
 WINDOW_MS = 120_000
 TARGET_MAX = 2048
-_SEG = re.compile(r"[a-z0-9][a-z0-9_-]*")
-_QKEY = re.compile(r"[a-z][a-z_]*")
-_QVAL = re.compile(r"[a-z0-9][a-z0-9_-]*")
 _HEX32 = re.compile(r"[0-9a-f]{32}")
 _TS = re.compile(r"0|[1-9][0-9]{0,15}")
 
@@ -68,40 +65,24 @@ def check_rows(rows, scope):
     return rows
 
 
+ROUTE = "/v2/hub/releases"
+
+
 def parse_target(target):
-    """Canonical targets only (10.6): ASCII, no `%`, non-empty lower-case segments, unique `key=value` query pairs.
-    Returns the workspace the target names (path `/v1/ws/<id>/...` or the single `workspace=` key; both must agree),
-    or None."""
-    if (
-        type(target) is not str
-        or not target.isascii()
-        or not target.startswith("/")
-        or len(target) > TARGET_MAX
-    ):
+    """Canonical targets only (10.6): ASCII, exactly `/v2/hub/releases`, and a query that is either absent or the
+    single key `workspace=<32 lower-case hex>`. No `%`, `//`, `.`/`..`, trailing slash, upper case, `#`, `+`, other
+    keys or repeated keys; every other spelling is malformed. Returns the workspace named, or None."""
+    if type(target) is not str or not target.isascii() or len(target) > TARGET_MAX:
         raise H.Refused("malformed")
     path, sep, query = target.partition("?")
-    segs = path[1:].split("/")
-    if not all(_SEG.fullmatch(x) for x in segs):
+    if path != ROUTE:
         raise H.Refused("malformed")
-    named = []
-    if len(segs) >= 3 and segs[0] == "v1" and segs[1] == "ws":
-        named.append(segs[2])
-    if sep:
-        keys = set()
-        for pair in query.split("&"):
-            k, eq, v = pair.partition("=")
-            if not eq or not _QKEY.fullmatch(k) or not _QVAL.fullmatch(v) or k in keys:
-                raise H.Refused("malformed")
-            keys.add(k)
-            if k == "workspace":
-                named.append(v)
-    if not all(_HEX32.fullmatch(x) for x in named) or len(set(named)) > 1:
+    if not sep:
+        return None
+    k, eq, v = query.partition("=")
+    if k != "workspace" or not eq or _HEX32.fullmatch(v) is None:
         raise H.Refused("malformed")
-    return named[0] if named else None
-
-
-def query_keys(target):
-    return {p.partition("=")[0] for p in target.partition("?")[2].split("&") if p}
+    return v
 
 
 def signed_bytes(hub_hex, ts_ms, method, target):
