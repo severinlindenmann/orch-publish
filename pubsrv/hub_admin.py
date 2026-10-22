@@ -17,6 +17,7 @@ import re
 import sqlite3
 
 from . import db
+from . import hub_admin_read as R
 from . import hub_path as H
 from . import relay_proto as proto
 from .auth import Refusal
@@ -32,7 +33,7 @@ def is_admin_path(path):
     return isinstance(path, str) and path.startswith(PREFIX)
 
 
-async def _send(send, status, body, extra=()):
+async def _send(send, status, body, extra=(), head=False):
     raw = json.dumps(body, separators=(",", ":")).encode()
     headers = [(k.encode(), v.encode()) for k, v in _HEADERS.items()] + [
         (b"content-type", b"application/json"),
@@ -40,7 +41,7 @@ async def _send(send, status, body, extra=()):
     ]
     headers += [(k.encode(), v.encode()) for k, v in extra]
     await send({"type": "http.response.start", "status": status, "headers": headers})
-    await send({"type": "http.response.body", "body": raw})
+    await send({"type": "http.response.body", "body": b"" if head else raw})
 
 
 async def _read(receive, scope):
@@ -92,10 +93,50 @@ def _route_ok(path):
     return path in (PREFIX + "card", PREFIX + "op-revoked") or _BINDING.fullmatch(path) is not None
 
 
+RELEASES = PREFIX + "releases"
+
+
+def _raw_target(scope):
+    """The request target exactly as sent (ASGI raw_path + raw query); None when it is not ASCII."""
+    raw = scope.get("raw_path")
+    if raw is None:
+        raw = scope.get("path", "").encode()
+    qs = scope.get("query_string") or b""
+    t = raw + (b"?" + qs if qs else b"")
+    return t.decode("ascii") if t.isascii() else None
+
+
+def _admin_read(scope, settings):
+    """GET / HEAD /v2/hub/releases[?workspace=<id32hex>]: protocol.md 10.6. Returns the JSON body."""
+    target = _raw_target(scope)
+    if target is None:
+        raise H.Refused("malformed")
+    headers = {k.decode("latin-1"): v.decode("latin-1") for k, v in scope["headers"]}
+    req = {"method": scope["method"], "target": target, "headers": headers}
+    now = settings.clock()
+    conn = db.connect(settings.db_path)
+    try:
+        hub = headers.get("orch-hub", "")
+        st = R.load_state(
+            conn, hub if re.fullmatch(r"[0-9a-f]{32}", hub) else "0" * 32, now, settings.dev_mode
+        )
+        res = R.check_admin_read(req, st, now)
+        if target.partition("?")[0] != RELEASES or R.query_keys(target) - {"workspace"}:
+            raise H.Refused("malformed")  # signed and canonical, but not a form this route serves
+        return R.list_releases(conn, res["workspaces"], now, res["named"])
+    finally:
+        conn.close()
+
+
 async def handle(scope, receive, send, settings):
     """ASGI handler for everything under /v2/hub/. Fail closed: an unexpected error is a generic 500."""
     path = scope.get("path", "")
     try:
+        if scope["method"] in ("GET", "HEAD") and path == RELEASES:
+            body = _admin_read(scope, settings)
+            return await _send(send, 200, body, head=scope["method"] == "HEAD")
+        if path == RELEASES:
+            raise Refusal(405, "method_not_allowed")  # GET / HEAD were handled above
         if not _route_ok(path):
             raise Refusal(404, "not_found")
         if scope["method"] != "PUT":
@@ -111,6 +152,8 @@ async def handle(scope, receive, send, settings):
         return
     except Refusal as r:
         extra = [("allow", "PUT")] if r.status == 405 else []
+        if r.status == 405 and path == RELEASES:
+            extra = [("allow", "GET, HEAD")]
         return await _send(send, r.status, r.body(), extra)
     except H.Refused as r:
         return await _send(send, r.refusal().status, {"error": r.code})

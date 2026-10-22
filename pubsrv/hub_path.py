@@ -33,6 +33,7 @@ LABELS = {
     "sig_hub_op_revoked": b"orch/v2/hub-op-revoked|",
     "sig_hub_card": b"orch/v2/hub-card|",
     "sig_hub_publish": b"orch/v2/hub-publish|",
+    "sig_hub_admin_read": b"orch/v2/hub-admin-read|",
     "sig_hub_binding": b"orch/v2/sig/hub-binding|",
     "sig_hub_unbound": b"orch/v2/sig/hub-unbound|",
     "sig_publish_hub": b"orch/v2/publish-hub|",

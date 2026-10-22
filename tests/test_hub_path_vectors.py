@@ -7,11 +7,15 @@ import pathlib
 import pytest
 
 from pubsrv import auth
+from pubsrv import hub_admin_read as R
 from pubsrv import hub_path as H
 from pubsrv import relay_proto as proto
 
 VEC = json.loads((pathlib.Path(__file__).parent / "vectors/vectors_hub.json").read_text())
-CHECKS = ("binding_store", "publish", "card", "card_text", "op_cert", "op_revoked")
+CHECKS = (
+    "binding_store", "publish", "card", "card_text", "op_cert", "op_revoked",
+    "admin_read", "admin_read_rows", "admin_read_row",
+)  # fmt: skip
 CASES = [c for c in VEC["cases"] if c["check"] in CHECKS]
 
 
@@ -57,6 +61,27 @@ def run(check, a):
         return {"hub_id": h["card"]["hub_id"], "op_cert_id": h["op_cert"]["cert_id"]}
     if check == "card_text":
         return run("card", {**a, "card": H._bad(proto.parse_json, bytes.fromhex(a["text_hex"]))})
+    if check == "admin_read":
+        pinned = frozenset(a.get("revoked_op_certs", []))
+        st = {
+            "cards": a["cards"],
+            "bindings": {
+                w: _apply_store(steps, w, proto.unb64u(a["cards"][w]["wsk_pub"], 65), now, dev)
+                for w, steps in a.get("bindings", {}).items()
+            },
+            "held": lambda h: (
+                H.verify_card(a["hub_card"], now, dev, revoked_op_certs=pinned)
+                if h == a["hub_id"]
+                else None
+            ),
+        }
+        r = R.check_admin_read(a["request"], st, now)
+        return {"hub": r["hub"], "workspaces": r["workspaces"]}
+    if check == "admin_read_rows":
+        return {"rows": len(R.check_rows(a["rows"], a["scope"]))}
+    if check == "admin_read_row":
+        R.check_row(a["row"])
+        return {"row": True}
     if check == "binding_store":
         s = _apply_store(a["steps"], a["workspace_id"], proto.unb64u(a["wsk_pub"], 65), now, dev)
         return {"binding_seq": s["binding_seq"], "status": s["status"]}
@@ -102,7 +127,7 @@ def test_vector(case):
 
 
 def test_every_relevant_case_is_run():
-    assert len(CASES) == 17 + 25 + 26 + 4 + 6 + 3
+    assert len(CASES) == 17 + 25 + 26 + 4 + 6 + 3 + 42 + 2 + 5
 
 
 def test_labels_match_the_contract():
