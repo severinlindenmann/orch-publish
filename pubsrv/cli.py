@@ -119,7 +119,7 @@ def serve(args):
         return 2
     # --api-host is what clients sign (it may be a public name when a proxy sits in front); it
     # defaults to the bind address
-    app = create_app(args.data, args.api_host or args.bind)
+    app = create_app(args.data, args.api_host or args.bind, dev_mode=args.dev_mode)
     # no access log: request lines carry ids, and the no-logging policy applies (design I15)
     uvicorn.run(
         app,
@@ -232,6 +232,11 @@ def main(argv=None):
     s.add_argument("--data", required=True)
     s.add_argument("--bind", default="127.0.0.1:8103", help="loopback host:port to listen on")
     s.add_argument("--api-host", default=None, help="host[:port] clients sign (default: --bind)")
+    s.add_argument(
+        "--dev-mode",
+        action="store_true",
+        help="dev instance: accepts only dev hub objects (dev: true) and refuses real ones",
+    )
     w2 = sub.add_parser("share", help="run the share server (public origin) on loopback")
     w2.add_argument("--data", required=True)
     w2.add_argument("--share-host", default="127.0.0.1:8104")
