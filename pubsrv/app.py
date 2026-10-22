@@ -8,7 +8,7 @@ import time
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from . import auth, db, hub_path, registry, shares
+from . import auth, db, hub_admin, hub_path, registry, shares
 from . import relay_proto as proto
 from .auth import Refusal
 
@@ -101,6 +101,10 @@ class SignedRequestMiddleware:
             if scope["type"] == "lifespan":
                 return await self.app(scope, receive, send)
             return  # websockets etc.: not served
+        if hub_admin.is_admin_path(
+            scope.get("path")
+        ):  # self-authenticating hub objects, no request signature
+            return await hub_admin.handle(scope, receive, send, self.s)
         try:
             ctx = self._admit(scope)
             declared = dict(scope["headers"]).get(b"content-length")
