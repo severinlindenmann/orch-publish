@@ -246,3 +246,24 @@ def test_internal_errors_leak_nothing(env, monkeypatch):
 
 def test_the_signed_routes_still_need_a_signature(env):
     assert env.c.get(f"/v1/ws/{WS_A}/status").status_code == 400
+
+
+@pytest.mark.parametrize("flag,want", [([], False), (["--dev-mode"], True)])
+def test_serve_dev_mode_flag_reaches_the_app(monkeypatch, tmp_path, flag, want):
+    import uvicorn
+
+    from pubsrv import app as app_mod
+    from pubsrv import cli
+
+    seen = {}
+    real = app_mod.create_app
+
+    def spy(data, host, clock=None, dev_mode=False):
+        a = real(data, host, clock, dev_mode)
+        seen["dev"] = a.state.settings.dev_mode
+        return a
+
+    monkeypatch.setattr(app_mod, "create_app", spy)
+    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+    assert cli.main(["serve", "--data", str(tmp_path / "d"), *flag]) == 0
+    assert seen["dev"] is want
