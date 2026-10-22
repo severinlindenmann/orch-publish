@@ -1,0 +1,110 @@
+"""The shared hub-contract vectors (tests/vectors/vectors_hub.json, copied from orch-hub, V3-D8) against
+pubsrv.hub_path: every case of the checks orch-publish implements must give the vector's result."""
+
+import json
+import pathlib
+
+import pytest
+
+from pubsrv import auth
+from pubsrv import hub_path as H
+from pubsrv import relay_proto as proto
+
+VEC = json.loads((pathlib.Path(__file__).parent / "vectors/vectors_hub.json").read_text())
+CHECKS = ("binding_store", "publish", "card", "card_text", "op_cert", "op_revoked")
+CASES = [c for c in VEC["cases"] if c["check"] in CHECKS]
+
+
+def _held(a):
+    pinned = proto.unb64u(a["pinned_root"], 65) if a.get("pinned_root") else None
+    rev = frozenset(a.get("revoked_op_certs", []))
+    dev = a.get("dev_mode", True)
+    prior = None
+    if a.get("held_card"):
+        prior = H.verify_card(a["held_card"], a["now_ms"], dev, pinned, rev)
+    return H.verify_card(a["card"], a["now_ms"], dev, pinned, rev, prior)
+
+
+def _apply_store(steps, ws, wsk, now, dev):
+    state = None
+    for st in steps:
+        if "binding" in st:
+            state = H.apply_binding(state, H.verify_binding(st["binding"], ws, wsk, now, dev))
+        else:
+            state = H.apply_unbound(state, H.verify_unbound(st["unbound"], ws, wsk, dev))
+    return state
+
+
+def run(check, a):
+    dev, now = a.get("dev_mode", True), a.get("now_ms", 0)
+    if check == "op_cert":
+        o = H.verify_op_cert(
+            a["signed"],
+            proto.unb64u(a["hk_root_pub"], 65),
+            now,
+            dev,
+            frozenset(a.get("revoked_op_certs", [])),
+        )
+        return {"cert_id": o["cert_id"]}
+    if check == "op_revoked":
+        return {
+            "cert_id": H.verify_op_revoked(a["signed"], proto.unb64u(a["hk_root_pub"], 65))[
+                "cert_id"
+            ]
+        }
+    if check == "card":
+        h = _held(a)
+        return {"hub_id": h["card"]["hub_id"], "op_cert_id": h["op_cert"]["cert_id"]}
+    if check == "card_text":
+        return run("card", {**a, "card": H._bad(proto.parse_json, bytes.fromhex(a["text_hex"]))})
+    if check == "binding_store":
+        s = _apply_store(a["steps"], a["workspace_id"], proto.unb64u(a["wsk_pub"], 65), now, dev)
+        return {"binding_seq": s["binding_seq"], "status": s["status"]}
+    assert check == "publish"
+    held = _held({**a, "card": a["hub_card"]})
+    bindings = {
+        w: _apply_store(steps, w, proto.unb64u(a["cards"][w]["wsk_pub"], 65), now, dev)
+        for w, steps in a.get("bindings", {}).items()
+    }
+    st = H.State(
+        a["cards"], bindings, lambda h: held if h == held["card"]["hub_id"] else None,
+        frozenset(a.get("revoked_devices", [])),
+    )  # fmt: skip
+    r = a["request"]
+    req = {
+        "method": r["method"],
+        "host": r["host"],
+        "target": r["target"],
+        "headers": {k.lower(): v for k, v in r["headers"].items()},
+        "body": bytes.fromhex(r["body_hex"]),
+        "access": r.get("access"),
+    }
+    if a.get("path") == "direct":
+        # the direct v2 12.1 path (auth.py) must refuse a hub-path signature
+        res = auth.publish_check(
+            r["headers"], r["method"], r["host"], r["target"], req["body"],
+            {a["workspace_id"]: a["cards"][a["workspace_id"]]["wsk_pub"]}, {}, now,
+        )  # fmt: skip
+        if res["status"] != 200:
+            raise H.Refused(res["error"])
+        return {"workspace": res["workspace"]}
+    nonces = auth.MemoryNonces({k: dict(v) for k, v in a.get("nonces", {}).items()})
+    return H.check_hub_publish(req, st, nonces, now, dev)
+
+
+@pytest.mark.parametrize("case", CASES, ids=lambda c: c["name"])
+def test_vector(case):
+    try:
+        got = {"ok": run(case["check"], case["args"])}
+    except H.Refused as r:
+        got = {"error": r.code}
+    assert got == case["expect"]
+
+
+def test_every_relevant_case_is_run():
+    assert len(CASES) == 17 + 25 + 26 + 4 + 6 + 3
+
+
+def test_labels_match_the_contract():
+    for k, v in H.LABELS.items():
+        assert VEC["labels"][k].encode() == v
