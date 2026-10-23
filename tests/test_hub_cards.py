@@ -148,3 +148,28 @@ def test_a_card_too_old_cannot_admit(tmp_path):
     r = put(e, WS_A)
     assert (r.status_code, r.json()["error"]) == (409, "stale_card")
     assert rows(e) == []
+
+
+def test_concurrent_old_and_new_card_admissions_leave_the_floor_at_the_new_one(env):
+    import threading
+
+    fresh = copy.deepcopy(CARD2)
+    fresh["o"]["card_seq"] = 3
+    fresh["sig"] = sign_card(fresh["o"])
+    results = []
+
+    def go(card):
+        results.append(put(env, WS_A, card).status_code)
+
+    for _ in range(5):
+        env.sql("DELETE FROM workspaces")
+        env.sql("DELETE FROM card_floor")
+        results.clear()
+        ts = [threading.Thread(target=go, args=(c,)) for c in (CARD1, fresh, CARD1, fresh)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        assert env.sql("SELECT card_seq FROM card_floor")[0][0] == 3  # never left at the old card
+        assert put(env, WS_A, CARD1).status_code == 409  # and the old card is refused afterwards
+        assert 200 in results

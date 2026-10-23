@@ -114,28 +114,33 @@ def _accept_workspace_card(conn, ws, obj, now):
         raise H.Refused("other_workspace")
     o = res["ok"]
     digest = hashlib.sha256(proto.cj(obj["card"])).hexdigest()
-    floor = conn.execute(
-        "SELECT card_seq, card_hash FROM card_floor WHERE workspace_id=?", (ws,)
-    ).fetchone()
-    admitted = registry.get_workspace(conn, ws) is not None
-    if floor is not None:
+
+    def guard(conn, admitted):
         # Freshness (v2 card update rules, protocol.md 16 #18): card_seq never goes back. The highest ever admitted is
         # kept across an unbind, so an old card cannot re-register a workspace. The very same card again is a no-op
-        # only while the workspace is still admitted (a retry after a lost answer).
-        if o["card_seq"] < floor["card_seq"]:
-            raise H.Refused("stale_card")
-        if o["card_seq"] == floor["card_seq"] and (not admitted or digest != floor["card_hash"]):
-            raise H.Refused("stale_card")
-    if not admitted and not now - CARD_MAX_AGE_MS <= o["issued_ms"] <= now + CARD_SKEW_MS:
-        raise H.Refused("stale_card")  # a new admission needs a card issued recently
-    registry.register(conn, ws, obj["card"]["delegation"], pk, now)
-    conn.execute(
-        "INSERT INTO card_floor(workspace_id, card_seq, card_hash) VALUES (?,?,?)"
-        " ON CONFLICT(workspace_id) DO UPDATE SET card_seq=excluded.card_seq, card_hash=excluded.card_hash"
-        " WHERE excluded.card_seq > card_floor.card_seq",
-        (ws, o["card_seq"], digest),
-    )
-    conn.commit()
+        # only while the workspace is still admitted (a retry after a lost answer). Read inside the write lock.
+        floor = conn.execute(
+            "SELECT card_seq, card_hash FROM card_floor WHERE workspace_id=?", (ws,)
+        ).fetchone()
+        if floor is not None:
+            if o["card_seq"] < floor["card_seq"]:
+                raise H.Refused("stale_card")
+            if o["card_seq"] == floor["card_seq"] and (
+                not admitted or digest != floor["card_hash"]
+            ):
+                raise H.Refused("stale_card")
+        if not admitted and not now - CARD_MAX_AGE_MS <= o["issued_ms"] <= now + CARD_SKEW_MS:
+            raise H.Refused("stale_card")  # a new admission needs a card issued recently
+
+    def after(conn):
+        conn.execute(
+            "INSERT INTO card_floor(workspace_id, card_seq, card_hash) VALUES (?,?,?)"
+            " ON CONFLICT(workspace_id) DO UPDATE SET card_seq=excluded.card_seq, card_hash=excluded.card_hash"
+            " WHERE excluded.card_seq > card_floor.card_seq",
+            (ws, o["card_seq"], digest),
+        )
+
+    registry.register(conn, ws, obj["card"]["delegation"], pk, now, guard=guard, after=after)
 
 
 CARD_MAX_AGE_MS = (
