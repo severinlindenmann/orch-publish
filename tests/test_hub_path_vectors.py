@@ -110,6 +110,10 @@ def run(check, a):
 
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c["name"])
 def test_vector(case):
+    if case["args"].get("path") == "direct":
+        pytest.skip(
+            "V3-D36: there is no direct path any more; tests/test_hub_path_http.py covers hub_required"
+        )
     try:
         got = {"ok": run(case["check"], case["args"])}
     except H.Refused as r:

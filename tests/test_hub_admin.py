@@ -245,7 +245,9 @@ def test_internal_errors_leak_nothing(env, monkeypatch):
 
 
 def test_the_signed_routes_still_need_a_signature(env):
-    assert env.c.get(f"/v1/ws/{WS_A}/status").status_code == 400
+    assert (
+        env.c.get(f"/v1/ws/{WS_A}/status").status_code == 403
+    )  # hub_required: no direct path (V3-D36)
 
 
 @pytest.mark.parametrize("flag,want", [([], False), (["--dev-mode"], True)])

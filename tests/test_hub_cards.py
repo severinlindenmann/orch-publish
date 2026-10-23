@@ -173,3 +173,19 @@ def test_an_old_card_is_admitted_the_first_time(tmp_path):
         NOW + 400 * 24 * 3600 * 1000
     )  # no age limit: the delegation is permanent and is all publish keeps
     assert put(e, WS_A).status_code == 200
+
+
+def test_tampered_delegation_is_refused(env):
+    bad = copy.deepcopy(CARD1)
+    bad["delegation"]["o"]["issued_ms"] += 1
+    r = put(env, WS_A, bad)
+    assert r.status_code >= 400 and rows(env) == []
+
+
+def test_the_direct_register_route_is_gone(env):
+    r = env.c.post(f"/v1/ws/{WS_A}/register", content=b"{}")
+    assert (r.status_code, r.json()["error"]) == (
+        403,
+        "hub_required",
+    )  # no direct request is served at all
+    assert rows(env) == []

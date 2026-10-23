@@ -7,80 +7,12 @@ import os
 import sqlite3
 
 import pytest
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 
 from pubsrv import auth, db
 from pubsrv import hub_path as H
 from pubsrv import relay_proto as proto
-from tests.test_publish_api_auth import HOST, NOW, WS_A, WS_B, Env, _priv, err, sign_headers
-
-PUBLIC_PATH = f"/v1/ws/{WS_A}/status"
-
-
-def pub(priv):
-    return priv.public_key().public_bytes(
-        serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint
-    )
-
-
-def sign(priv, msg):
-    r, s = decode_dss_signature(priv.sign(msg, ec.ECDSA(hashes.SHA256())))
-    return proto.b64u(r.to_bytes(32, "big") + s.to_bytes(32, "big"))
-
-
-def signed(priv, label, o, **extra):
-    return {"o": o, **extra, "sig": sign(priv, label + proto.cj(o))}
-
-
-def newkey():
-    return ec.generate_private_key(ec.SECP256R1())
-
-
-class Hub:
-    def __init__(self, dev=True, cert_seq=1):
-        self.root, self.op = newkey(), newkey()
-        self.id = H.hub_id(pub(self.root))
-        hdr = {"v": 2, "suite": 2, "hv": 0}
-        op_cert = signed(
-            self.root,
-            H.LABELS["sig_hub_op_cert"],
-            {
-                **hdr, "kind": "hub.op_cert", "hub_id": self.id, "cert_id": os.urandom(16).hex(),
-                "op_seq": cert_seq, "hk_op_pub": proto.b64u(pub(self.op)), "issued_ms": NOW - 1000,
-                "expires_ms": NOW + 10**9, "dev": dev,
-            },
-        )  # fmt: skip
-        self.card = signed(
-            self.op,
-            H.LABELS["sig_hub_card"],
-            {
-                **hdr, "kind": "hub.card", "hub_id": self.id, "hk_root_pub": proto.b64u(pub(self.root)),
-                "hxk_pub": proto.b64u(pub(newkey())), "relay_url": None,
-                "tls_spki_sha256": proto.b64u(os.urandom(32)), "card_seq": 1, "issued_ms": NOW - 1000, "dev": dev,
-            },
-            op_cert=op_cert,
-        )  # fmt: skip
-
-
-def binding(wsk, hub, ws=WS_A, seq=1, dev=True, wsk_pub=None, **over):
-    o = {
-        "v": 2, "suite": 2, "hv": 0, "kind": "hub.binding", "workspace_id": ws,
-        "wsk_pub": proto.b64u(wsk_pub or pub(wsk)), "hub_id": hub.id,
-        "hk_root_pub": proto.b64u(pub(hub.root)), "mode": "selective", "binding_seq": seq,
-        "valid_from_ms": NOW - 1000, "dev": dev,
-    }  # fmt: skip
-    o.update(over)
-    return signed(wsk, H.LABELS["sig_hub_binding"], o)
-
-
-def unbound(wsk, hub, ws=WS_A, seq=1, dev=True):
-    o = {
-        "v": 2, "suite": 2, "hv": 0, "kind": "hub.unbound", "workspace_id": ws, "hub_id": hub.id,
-        "binding_seq": seq, "unbound_ms": NOW, "dev": dev,
-    }  # fmt: skip
-    return signed(wsk, H.LABELS["sig_hub_unbound"], o)
+from tests.hub_helpers import PUBLIC_PATH, Hub, binding, build, newkey, pub, signed, unbound
+from tests.test_publish_api_auth import HOST, NOW, WS_A, WS_B, Env, _priv, err
 
 
 class Owner:
@@ -125,44 +57,6 @@ class Owner:
         )
 
 
-def build(
-    hub,
-    wsk,
-    method="GET",
-    target=PUBLIC_PATH,
-    body=b"",
-    ts=NOW,
-    nonce=None,
-    approval=None,
-    hub_op=None,
-):
-    """The headers the host builds and the hub forwards (11.1)."""
-    nonce = nonce or os.urandom(16)
-    pb = H.hub_path_signed_bytes(
-        bytes.fromhex(WS_A), ts, nonce, method, HOST, target, body, hub.id, approval
-    )
-    h = {
-        "Orch-Workspace": WS_A, "Orch-Ts": str(ts), "Orch-Nonce": nonce.hex(), "Orch-Signature": None,
-        "Orch-Hub": hub.id,
-    }  # fmt: skip
-    r, s = decode_dss_signature(wsk.sign(pb, ec.ECDSA(hashes.SHA256())))
-    h["Orch-Signature"] = proto.b64u(r.to_bytes(32, "big") + s.to_bytes(32, "big"))
-    r, s = decode_dss_signature(
-        (hub_op or hub.op).sign(H.hub_publish_bytes(hub.id, pb), ec.ECDSA(hashes.SHA256()))
-    )
-    h["Orch-Hub-Signature"] = proto.b64u(r.to_bytes(32, "big") + s.to_bytes(32, "big"))
-    if approval is not None:
-        h["Orch-Owner-Approval"] = proto.b64u(proto.cj(approval))
-    return h, {
-        "hub": hub,
-        "ts": ts,
-        "nonce": nonce,
-        "method": method,
-        "target": target,
-        "body": body,
-    }
-
-
 @pytest.fixture
 def env(tmp_path):
     e = Env(tmp_path)
@@ -170,6 +64,16 @@ def env(tmp_path):
     assert e.register().status_code == 200
     e.app.state.settings.dev_mode = True
     return e
+
+
+def _direct_headers():
+    nonce = os.urandom(16)
+    return {
+        "Orch-Workspace": WS_A,
+        "Orch-Ts": str(NOW),
+        "Orch-Nonce": nonce.hex(),
+        "Orch-Signature": proto.b64u(bytes(64)),
+    }
 
 
 def wsk_a():
@@ -351,8 +255,8 @@ def test_wsk_signature_by_another_key(env):
     assert (r.status_code, err(r)) == (401, "bad_signature")
 
 
-def test_hub_request_replayed_on_the_direct_path_and_back(env):
-    """L2-2: the hub-path WSK signature never verifies as a v2 12.1 request, and the reverse."""
+def test_a_request_without_hub_headers_is_refused_and_half_a_pair_is_malformed(env):
+    """V3-D36: no direct path. The host's own headers alone (what a direct request carried) are `hub_required`."""
     hub = bound(env)
     h, _ = build(hub, wsk_a())
     direct = {
@@ -361,18 +265,11 @@ def test_hub_request_replayed_on_the_direct_path_and_back(env):
         if k in ("Orch-Workspace", "Orch-Ts", "Orch-Nonce", "Orch-Signature")
     }
     r = env.c.get(PUBLIC_PATH, headers=direct)
-    assert (r.status_code, err(r)) == (401, "bad_signature")
-    # a genuine direct request, with hub headers added by a hub, is no hub request either
-    dh = sign_headers(wsk_a(), WS_A, "GET", HOST, PUBLIC_PATH, ts=NOW)
-    forged = {**dh, "Orch-Hub": hub.id, "Orch-Hub-Signature": h["Orch-Hub-Signature"]}
-    r = env.c.get(PUBLIC_PATH, headers=forged)
-    assert (r.status_code, err(r)) == (401, "bad_signature")
-    assert (
-        env.c.get(
-            PUBLIC_PATH, headers=sign_headers(wsk_a(), WS_A, "GET", HOST, PUBLIC_PATH, ts=NOW)
-        ).status_code
-        == 200
-    )
+    assert (r.status_code, err(r)) == (403, "hub_required")
+    half = {**direct, "Orch-Hub": hub.id}
+    r = env.c.get(PUBLIC_PATH, headers=half)
+    assert (r.status_code, err(r)) == (400, "malformed")
+    assert env.c.get(PUBLIC_PATH, headers=h).status_code == 200  # the same request through the hub
 
 
 def test_half_a_hub_header_pair_is_malformed(env):
@@ -466,7 +363,7 @@ def test_blocked_workspace_is_refused_after_authentication(env):
 def test_a_hub_cannot_register_a_workspace(env):
     hub = bound(env)
     r, _, _ = go(env, hub, method="POST", target=f"/v1/ws/{WS_A}/register", body=b"{}")
-    assert (r.status_code, err(r)) == (404, "not_found")
+    assert r.status_code == 404  # the route is gone; admission is the card (/v2/hub/cards/{ws})
 
 
 def test_unknown_workspace(env):
@@ -710,13 +607,10 @@ def test_schema_1_is_still_refused(tmp_path):
         db.init(path)
 
 
-def test_direct_path_unchanged_for_a_bound_workspace(env):
-    """Until H6 a bound workspace may still publish directly (11.2 'Direct requests')."""
+def test_a_bound_workspace_has_no_direct_path_either(env):
     bound(env)
-    r = env.c.get(
-        PUBLIC_PATH, headers=sign_headers(wsk_a(), WS_A, "GET", HOST, PUBLIC_PATH, ts=NOW)
-    )
-    assert r.status_code == 200
+    r = env.c.get(PUBLIC_PATH, headers=_direct_headers())
+    assert (r.status_code, err(r)) == (403, "hub_required")
 
 
 def test_json_body_is_covered_by_the_hub_path_signature(env):
