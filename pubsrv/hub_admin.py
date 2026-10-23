@@ -4,6 +4,8 @@
     PUT /v2/hub/card                    body: signed hub.card (with its op_cert)
     PUT /v2/hub/op-revoked              body: root-signed hub.op_revoked
     PUT /v2/hub/bindings/{workspace_id} body: WSK-signed hub.binding or hub.unbound (chosen by o.kind)
+    PUT /v2/hub/cards/{workspace_id}    body: {card, pk_pub}: the workspace's v2 card as it reached the hub (card_put);
+                                        the only way a workspace is admitted (V3-D36: no direct register)
 
 No transport authentication, by design (V3-D16): every object authenticates itself (a card by its HK_root and op
 cert, a revocation by HK_root, a binding / unbound by the WSK of the workspace card orch-publish itself stores), and
@@ -16,7 +18,7 @@ import json
 import re
 import sqlite3
 
-from . import db
+from . import db, registry
 from . import hub_admin_read as R
 from . import hub_path as H
 from . import relay_proto as proto
@@ -26,6 +28,7 @@ from .registry import ID32
 MAX_BODY = 64 * 1024
 PREFIX = "/v2/hub/"
 _BINDING = re.compile(rf"/v2/hub/bindings/({ID32})")
+_CARD = re.compile(rf"/v2/hub/cards/({ID32})")
 _HEADERS = {"cache-control": "no-store", "x-content-type-options": "nosniff"}
 
 
@@ -75,6 +78,8 @@ def _parse(raw):
 def _apply(conn, path, obj, now, dev):
     if path == PREFIX + "card":
         H.accept_hub_card(conn, obj, now, dev)
+    elif _CARD.fullmatch(path):
+        _accept_workspace_card(conn, _CARD.fullmatch(path).group(1), obj, now)
     elif path == PREFIX + "op-revoked":
         H.accept_op_revoked(conn, obj, now)
     else:
@@ -89,8 +94,64 @@ def _apply(conn, path, obj, now, dev):
             raise H.Refused("malformed")
 
 
+def _accept_workspace_card(conn, ws, obj, now):
+    """A workspace's v2 card (card_put through the hub). Verified here, never trusted from the hub: the owner's PK
+    signed the delegation, WSK signed the card. Admission is exactly the old direct register: the admin's pre-bind, the
+    owner allowlist, no block, and a delegation that never changes (`registry.register`). Identical re-push: 200."""
+    if set(obj) != {"card", "pk_pub"} or type(obj["card"]) is not dict:
+        raise H.Refused("malformed")
+    try:
+        pk = proto.unb64u(obj["pk_pub"], 65)
+        if not proto.SUITE.pub_ok(pk):
+            raise ValueError("pk")
+    except (ValueError, TypeError):
+        raise H.Refused("malformed") from None
+    res = proto.verify_card(obj["card"], pk)
+    if "refuse" in res:
+        raise H.Refused(res["refuse"] if res["refuse"] in _CARD_REFUSALS else "malformed")
+    if res["ok"]["workspace_id"] != ws:
+        raise H.Refused("other_workspace")
+    o = res["ok"]
+
+    def guard(conn, admitted):
+        # card_seq never goes back (v2 card update rules, protocol.md 16 #18): the highest ever admitted is kept across
+        # an unbind and read inside the write lock. Nothing else is checked for freshness: publish stores only the
+        # permanent delegation, so an old card of the same workspace carries nothing new.
+        floor = conn.execute(
+            "SELECT card_seq FROM card_floor WHERE workspace_id=?", (ws,)
+        ).fetchone()
+        if floor is not None and o["card_seq"] < floor["card_seq"]:
+            raise H.Refused("stale_card")
+
+    def after(conn):
+        conn.execute(
+            "INSERT INTO card_floor(workspace_id, card_seq) VALUES (?,?)"
+            " ON CONFLICT(workspace_id) DO UPDATE SET card_seq=excluded.card_seq"
+            " WHERE excluded.card_seq > card_floor.card_seq",
+            (ws, o["card_seq"]),
+        )
+
+    registry.register(conn, ws, obj["card"]["delegation"], pk, now, guard=guard, after=after)
+
+
+_CARD_REFUSALS = frozenset(
+    [
+        "malformed",
+        "wrong_suite",
+        "other_person",
+        "delegation_mismatch",
+        "bad_signature",
+        "delegation_refused",
+    ]
+)
+
+
 def _route_ok(path):
-    return path in (PREFIX + "card", PREFIX + "op-revoked") or _BINDING.fullmatch(path) is not None
+    return (
+        path in (PREFIX + "card", PREFIX + "op-revoked")
+        or _BINDING.fullmatch(path) is not None
+        or _CARD.fullmatch(path) is not None
+    )
 
 
 RELEASES = PREFIX + "releases"

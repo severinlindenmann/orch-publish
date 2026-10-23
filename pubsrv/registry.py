@@ -87,16 +87,21 @@ def check_admitted(conn, row):
         raise Refusal(403, "owner_not_allowed")
 
 
-def register(conn, ws_hex, delegation, pk, now_ms):
+def register(conn, ws_hex, delegation, pk, now_ms, guard=None, after=None):
     """Bind a workspace to its genesis delegation (design 2.6b). Everything is decided inside one
     BEGIN IMMEDIATE transaction on freshly read state. The binding is permanent: a byte-identical
     delegation is "unchanged", any other one is 409 delegation_changed; only an admin unbind
-    releases it. Returns "registered" | "unchanged"."""
+    releases it. Returns "registered" | "unchanged".
+
+    `guard(conn, admitted)` runs right after BEGIN IMMEDIATE and `after(conn)` right before COMMIT, so a caller's own
+    checks and writes share this transaction (the hub card route keeps its freshness floor there)."""
     o = check_delegation(delegation, pk, ws_hex, ws_hex)
     blob = proto.cj(delegation).decode()
     conn.execute("BEGIN IMMEDIATE")
     try:
         row = get_workspace(conn, ws_hex)
+        if guard is not None:
+            guard(conn, row is not None)
         if row is None:
             # checked on freshly read state, inside the lock (M2)
             require_prebound(conn, ws_hex, o["owner_person_id"])
@@ -119,6 +124,8 @@ def register(conn, ws_hex, delegation, pk, now_ms):
             if row["delegation_json"] != blob:
                 raise Refusal(409, "delegation_changed")
             outcome = "unchanged"
+        if after is not None:
+            after(conn)
         conn.execute("COMMIT")
         return outcome
     except BaseException:
