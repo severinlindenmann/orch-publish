@@ -3,7 +3,9 @@
 import os
 import sqlite3
 
-SCHEMA_VERSION = 2  # 2: workspaces.delegation_json replaces card_seq/card_json (design 2.6b)
+SCHEMA_VERSION = 3  # 2: workspaces.delegation_json replaces card_seq/card_json (design 2.6b)
+# 3: hub path (orch-core #898): hub_bindings, hub_cards, hub_op_revoked, hub_revoked_devices (additive only)
+MIGRATABLE_FROM = 2
 
 
 class SchemaError(Exception):
@@ -37,6 +39,29 @@ CREATE TABLE IF NOT EXISTS nonces(
   UNIQUE(ws, nonce)
 );
 CREATE INDEX IF NOT EXISTS nonces_until ON nonces(until_ms);
+CREATE TABLE IF NOT EXISTS hub_bindings(
+  workspace_id TEXT PRIMARY KEY,  -- no FK: the unbound record outlives an unbind/re-register of the workspace
+  binding_seq INTEGER NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('bound','unbound')),
+  hub_id TEXT NOT NULL,
+  binding_json TEXT,
+  updated_ms INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS hub_cards(
+  hub_id TEXT PRIMARY KEY,
+  card_json TEXT NOT NULL,
+  updated_ms INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS hub_op_revoked(
+  hub_id TEXT NOT NULL,
+  cert_id TEXT NOT NULL,
+  revoked_ms INTEGER NOT NULL,
+  PRIMARY KEY(hub_id, cert_id)
+);
+CREATE TABLE IF NOT EXISTS hub_revoked_devices(
+  device_id TEXT PRIMARY KEY,
+  revoked_ms INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS shares(
   id TEXT PRIMARY KEY,
   owner_ws TEXT NOT NULL,  -- no FK: tombstones outlive an unbind
@@ -105,7 +130,8 @@ def init(path):
     try:
         have = conn.execute("PRAGMA user_version").fetchone()[0]
         has_tables = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table'").fetchone()
-        if (has_tables and have != SCHEMA_VERSION) or have > SCHEMA_VERSION:
+        # version 2 -> 3 only adds tables (CREATE IF NOT EXISTS below), so it migrates in place
+        if (has_tables and have not in (SCHEMA_VERSION, MIGRATABLE_FROM)) or have > SCHEMA_VERSION:
             raise SchemaError(
                 "this data dir was made by an older orch-publish (dev only, no upgrade path): "
                 "stop the server and delete the data dir, then start again"

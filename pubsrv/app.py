@@ -8,7 +8,7 @@ import time
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from . import auth, db, registry, shares
+from . import auth, db, hub_admin, hub_path, registry, shares
 from . import relay_proto as proto
 from .auth import Refusal
 
@@ -24,10 +24,13 @@ _HEADERS = {"cache-control": "no-store", "x-content-type-options": "nosniff"}
 class Settings:
     """api_host is the host clients sign (design I6): the configured value, never the Host header."""
 
-    def __init__(self, data_dir, api_host, clock=None):
+    def __init__(self, data_dir, api_host, clock=None, dev_mode=False):
         if not isinstance(api_host, str) or not _HOST.fullmatch(api_host):
             raise ValueError("api_host must be a lower-case host[:port]")
         self.api_host = api_host
+        self.dev_mode = bool(
+            dev_mode
+        )  # a dev publish accepts only dev hub objects, a real one only real (2.4)
         self.db_path = db.prepare_dir(data_dir)
         self.clock = clock or (lambda: int(time.time() * 1000))
 
@@ -66,7 +69,20 @@ async def _read_body(receive, limit):
 class _Ctx:
     """What the header-only phase learned (no body read yet)."""
 
-    __slots__ = ("cred", "limit", "m", "method", "now", "register", "row", "target", "ws_hex")
+    __slots__ = (
+        "cred",
+        "hdrs",
+        "hub",
+        "limit",
+        "m",
+        "method",
+        "now",
+        "path",
+        "register",
+        "row",
+        "target",
+        "ws_hex",
+    )
 
 
 class SignedRequestMiddleware:
@@ -85,6 +101,10 @@ class SignedRequestMiddleware:
             if scope["type"] == "lifespan":
                 return await self.app(scope, receive, send)
             return  # websockets etc.: not served
+        if hub_admin.is_admin_path(
+            scope.get("path")
+        ):  # self-authenticating hub objects, no request signature
+            return await hub_admin.handle(scope, receive, send, self.s)
         try:
             ctx = self._admit(scope)
             declared = dict(scope["headers"]).get(b"content-length")
@@ -136,11 +156,26 @@ class SignedRequestMiddleware:
         except UnicodeError:
             raise Refusal(400, "malformed") from None
         c.method = scope["method"]
+        c.hdrs, c.path = raw_headers, scope["path"]
+        # A request with Orch-Hub / Orch-Hub-Signature is on the hub path (protocol 11); without them it is the
+        # direct v2 path, unchanged. Half a hub header pair is ambiguous, so it is malformed.
+        hub_hdrs = {"orch-hub", "orch-hub-signature"} & set(raw_headers)
+        if hub_hdrs and len(hub_hdrs) != 2:
+            raise Refusal(400, "malformed")
+        c.hub = raw_headers["orch-hub"] if hub_hdrs else None
+        if c.hub is not None:
+            try:  # 1 (hub syntax, approval strictly parsed, ASCII method/host/target) and 2
+                parsed = hub_path.parse_headers(raw_headers, c.method, s.api_host, c.target)
+                hub_path.check_window(parsed["ts"], c.now)
+            except hub_path.Refused as r:
+                raise r.refusal() from None
         c.cred = auth.step1_headers(raw_headers)  # 1
         auth.step2_window(c.cred, c.now)  # 2
         c.ws_hex = c.cred.ws.hex()
         c.m = _WS_PATH.fullmatch(scope["path"])
-        c.register = c.method == "POST" and c.m is not None and c.m.group(2) == "/register"
+        c.register = (
+            c.hub is None and c.method == "POST" and c.m is not None and c.m.group(2) == "/register"
+        )
         conn = db.connect(s.db_path)
         try:
             c.row = registry.get_workspace(conn, c.ws_hex)
@@ -159,6 +194,8 @@ class SignedRequestMiddleware:
         s = self.s
         conn = db.connect(s.db_path)
         try:
+            if c.hub is not None:
+                return self._verify_hub(c, body, conn)
             if c.row is not None:
                 wsk = c.row[
                     "wsk_pub"
@@ -184,9 +221,36 @@ class SignedRequestMiddleware:
             conn.close()
         return c.ws_hex
 
+    def _verify_hub(self, c, body, conn):
+        """Protocol 11.2 steps 3-9 on the hub path (1-2 ran in `_admit`); policy checks come after, as on the
+        direct path (L2), on freshly read state."""
+        s = self.s
+        try:
+            req = {
+                "method": c.method,
+                "host": s.api_host,
+                "target": c.target,
+                "headers": c.hdrs,
+                "body": body,
+                "access": hub_path.request_access(c.method, c.path),
+            }
+            st = hub_path.load_state(conn, c.ws_hex, c.hub, c.now, s.dev_mode)
+            hub_path.check_hub_publish(req, st, auth.DbNonces(conn), c.now, s.dev_mode)
+            hub_path.still_bound(
+                conn, c.ws_hex, c.hub
+            )  # an unbound since admission refuses this request
+        except hub_path.Refused as r:
+            raise r.refusal() from None
+        registry.require_binding(conn, c.ws_hex, c.row["wsk_pub"])
+        if c.m is not None and c.m.group(1) != c.ws_hex:
+            raise Refusal(403, "wrong_workspace")  # I3
+        if c.m is None or c.m.group(2) == "/register":
+            raise Refusal(404, "not_found")  # a hub never registers a workspace
+        return c.ws_hex
 
-def create_app(data_dir, api_host, clock=None):
-    settings = Settings(data_dir, api_host, clock)
+
+def create_app(data_dir, api_host, clock=None, dev_mode=False):
+    settings = Settings(data_dir, api_host, clock, dev_mode)
     db.init(settings.db_path)
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.state.settings = settings
