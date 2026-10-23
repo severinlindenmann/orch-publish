@@ -1,12 +1,17 @@
 """PUT /v2/hub/cards/{ws}: a workspace is admitted through the card the hub carried (card_put), V3-D36 / R5a."""
 
 import copy
+import io
 import json
 
 import pytest
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 
+from pubsrv import db
 from pubsrv import relay_proto as proto
-from tests.test_publish_api_auth import CARD1, CARD2, PK_B64, WS_A, WS_B, Env
+from tests.test_publish_api_auth import CARD1, CARD2, NOW, PK_B64, WS_A, WS_B, Env, _priv
 
 
 @pytest.fixture
@@ -94,3 +99,52 @@ def test_extra_field_and_bad_shapes_are_malformed(env, extra):
     assert env.c.get(f"/v2/hub/cards/{WS_A}").status_code == 405
     assert env.c.put("/v2/hub/cards/nothex", content=b"{}").status_code == 404
     assert rows(env) == []
+
+
+def sign_card(o):
+    msg = proto.L["sig_card_wsk"] + proto.cj(o)
+    r, s = decode_dss_signature(_priv("wsk_a.sig").sign(msg, ec.ECDSA(hashes.SHA256())))
+    return proto.b64u(r.to_bytes(32, "big") + s.to_bytes(32, "big"))
+
+
+def unbind(e, ws=WS_A):
+    from pubsrv import cli
+
+    conn = db.connect(e.path)
+    try:
+        cli._unbind(conn, ws, io.StringIO())
+    finally:
+        conn.close()
+    e.allow()  # the admin pre-binds it again
+
+
+def test_replay_of_the_same_card_after_unbind_is_refused(env):
+    assert put(env, WS_A).status_code == 200
+    unbind(env)
+    r = put(env, WS_A)
+    assert (r.status_code, r.json()["error"]) == (409, "stale_card")
+    assert rows(env) == []
+
+
+def test_older_card_after_unbind_is_refused_and_a_fresh_one_accepted(env):
+    assert put(env, WS_A, CARD2).status_code == 200  # card_seq 2 is the floor
+    unbind(env)
+    assert put(env, WS_A, CARD1).json()["error"] == "stale_card"  # card_seq 1 < 2
+    fresh = copy.deepcopy(CARD2)
+    fresh["o"]["card_seq"] = 3
+    fresh["sig"] = sign_card(fresh["o"])
+    assert put(env, WS_A, fresh).status_code == 200
+
+
+def test_older_card_while_admitted_is_refused(env):
+    assert put(env, WS_A, CARD2).status_code == 200
+    assert put(env, WS_A, CARD1).json()["error"] == "stale_card"
+
+
+def test_a_card_too_old_cannot_admit(tmp_path):
+    e = Env(tmp_path)
+    e.allow()
+    e.now = NOW + 31 * 24 * 3600 * 1000
+    r = put(e, WS_A)
+    assert (r.status_code, r.json()["error"]) == (409, "stale_card")
+    assert rows(e) == []
