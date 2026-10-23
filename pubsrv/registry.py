@@ -1,4 +1,4 @@
-"""Workspace admission (design 2.6b): the self-presented delegation, the owner allowlist, block."""
+"""Workspace admission (design 2.6b): the delegation of a PK-verified card (hub `card_put`), the owner allowlist, block."""
 
 import sqlite3
 
@@ -6,24 +6,6 @@ from . import relay_proto as proto
 from .auth import Refusal
 
 ID32 = r"[0-9a-f]{32}"
-
-
-def parse_register_body(raw):
-    """Strict body: exactly {delegation, owner_pk}. Returns (delegation, owner_pk_bytes)."""
-    try:
-        body = proto.parse_json(raw)
-        if (
-            not isinstance(body, dict)
-            or set(body) != {"delegation", "owner_pk"}
-            or not isinstance(body["delegation"], dict)
-        ):
-            raise ValueError("shape")
-        pk = proto.unb64u(body["owner_pk"], 65)
-        if not proto.SUITE.pub_ok(pk):
-            raise ValueError("pk")
-    except (ValueError, TypeError):
-        raise Refusal(400, "malformed") from None
-    return body["delegation"], pk
 
 
 def check_delegation(delegation, pk, ws_hex, path_ws=None):
@@ -37,11 +19,6 @@ def check_delegation(delegation, pk, ws_hex, path_ws=None):
     if o["workspace_id"] != ws_hex or (path_ws is not None and path_ws != ws_hex):
         raise Refusal(400, "other_workspace")
     return o
-
-
-def delegation_key(delegation, pk, ws_hex, path_ws):
-    """For an unknown workspace: the wsk_pub the request signature must verify under (step 3)."""
-    return check_delegation(delegation, pk, ws_hex, path_ws)["wsk_pub"]
 
 
 def require_prebound(conn, ws_hex, person_id):

@@ -173,3 +173,19 @@ def test_concurrent_old_and_new_card_admissions_leave_the_floor_at_the_new_one(e
         assert env.sql("SELECT card_seq FROM card_floor")[0][0] == 3  # never left at the old card
         assert put(env, WS_A, CARD1).status_code == 409  # and the old card is refused afterwards
         assert 200 in results
+
+
+def test_tampered_delegation_is_refused(env):
+    bad = copy.deepcopy(CARD1)
+    bad["delegation"]["o"]["issued_ms"] += 1
+    r = put(env, WS_A, bad)
+    assert r.status_code >= 400 and rows(env) == []
+
+
+def test_the_direct_register_route_is_gone(env):
+    r = env.c.post(f"/v1/ws/{WS_A}/register", content=b"{}")
+    assert (r.status_code, r.json()["error"]) == (
+        403,
+        "hub_required",
+    )  # no direct request is served at all
+    assert rows(env) == []

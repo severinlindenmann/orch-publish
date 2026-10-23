@@ -407,7 +407,10 @@ def test_no_share_route_works_unsigned(two):
         ("DELETE", f"/shares/{sid}"),
     ]:
         r = two.c.request(method, f"/v1/ws/{WS_A}{tail}", content=b"{}")
-        assert r.status_code == 400 and err(r) == "malformed", (method, tail)
+        assert (r.status_code, err(r)) == (403, "hub_required"), (
+            method,
+            tail,
+        )  # no direct path (V3-D36)
     assert two.row(sid)["state"] == "live"
 
 

@@ -25,7 +25,7 @@ class Two(Env):
     def __init__(self, tmp_path):
         super().__init__(tmp_path)
         self.allow()
-        assert self.register().status_code == 200
+        self.admit()
         self.wsk_b = _priv("wsk_b.sig")
         pub = self.wsk_b.public_key().public_bytes(
             serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint
@@ -41,6 +41,7 @@ class Two(Env):
             self.now,
             self.now,
         )
+        self.bind(WS_B, wsk=self.wsk_b)
 
     def req(self, who, method, path, body=b"", **kw):
         ws, priv = (WS_A, self.wsk) if who == "a" else (WS_B, self.wsk_b)

@@ -104,21 +104,16 @@ def run(check, a):
         "body": bytes.fromhex(r["body_hex"]),
         "access": r.get("access"),
     }
-    if a.get("path") == "direct":
-        # the direct v2 12.1 path (auth.py) must refuse a hub-path signature
-        res = auth.publish_check(
-            r["headers"], r["method"], r["host"], r["target"], req["body"],
-            {a["workspace_id"]: a["cards"][a["workspace_id"]]["wsk_pub"]}, {}, now,
-        )  # fmt: skip
-        if res["status"] != 200:
-            raise H.Refused(res["error"])
-        return {"workspace": res["workspace"]}
     nonces = auth.MemoryNonces({k: dict(v) for k, v in a.get("nonces", {}).items()})
     return H.check_hub_publish(req, st, nonces, now, dev)
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c["name"])
 def test_vector(case):
+    if case["args"].get("path") == "direct":
+        pytest.skip(
+            "V3-D36: there is no direct path any more; tests/test_hub_path_http.py covers hub_required"
+        )
     try:
         got = {"ok": run(case["check"], case["args"])}
     except H.Refused as r:

@@ -1,6 +1,5 @@
 """Signed-request auth for pubsrv (protocol-v2 12.1, design 2.5/2.6/3). Fake keys only (vectors)."""
 
-import copy
 import hashlib
 import json
 import os
@@ -13,9 +12,10 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 from fastapi.testclient import TestClient
 
-from pubsrv import auth, cli, db
+from pubsrv import auth, cli, db, hub_path
 from pubsrv import relay_proto as proto
 from pubsrv.app import create_app
+from tests.hub_helpers import Hub, binding, build
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 VEC = json.loads((ROOT / "tests/vectors/publish_v2.json").read_text())
@@ -48,26 +48,30 @@ def make_delegation(**over):
     return {"o": o, "sig": proto.b64u(r.to_bytes(32, "big") + s.to_bytes(32, "big"))}
 
 
+HUB = (
+    Hub()
+)  # the one hub of these tests: its card and the workspaces' bindings are what pubsrv holds
+
+
 def sign_headers(priv, ws, method, host, target, body=b"", ts=NOW, nonce=None):
-    nonce = nonce or os.urandom(16)
-    msg = auth.signed_bytes(bytes.fromhex(ws), ts, nonce, method, host, target, body)
-    r, s = decode_dss_signature(priv.sign(msg, ec.ECDSA(hashes.SHA256())))
-    return {
-        "Orch-Workspace": ws,
-        "Orch-Ts": str(ts),
-        "Orch-Nonce": nonce.hex(),
-        "Orch-Signature": proto.b64u(r.to_bytes(32, "big") + s.to_bytes(32, "big")),
-    }
+    """The headers of a hub-path request (11.1): the host's signature plus the hub's two (V3-D36: the only kind)."""
+    return build(HUB, priv, method, target, body, ts=ts, nonce=nonce, ws=ws, host=host)[0]
 
 
 class Env:
+    """pubsrv with a clock, a data dir and a hub. Every request is a hub-path request (V3-D36): ``send`` builds it the
+    way the host does and the hub forwards it; ``register`` admits a workspace through its card (``card_put``),
+    ``bind`` gives the hub's card and the workspace's binding, ``admit`` does both."""
+
     def __init__(self, tmp_path):
         self.data = str(tmp_path / "data")
         self.now = NOW
         self.app = create_app(self.data, HOST, clock=lambda: self.now)
+        self.app.state.settings.dev_mode = True
         self.c = TestClient(self.app, base_url="http://" + HOST)
         self.wsk = _priv("wsk_a.sig")
         self.path = self.app.state.settings.db_path
+        self.hub = HUB
 
     def sql(self, q, *a):
         conn = db.connect(self.path)
@@ -94,21 +98,39 @@ class Env:
         headers=None,
         **kw,
     ):
-        hdr = headers or sign_headers(
-            priv or self.wsk,
-            ws,
-            method,
-            sign_host,
-            sign_target or path,
-            body,
-            ts=kw.pop("ts", self.now),
-            nonce=kw.pop("nonce", None),
-        )
-        return self.c.request(method, path, content=body, headers=hdr)
+        if headers is None:
+            headers, _ = build(
+                self.hub,
+                priv or self.wsk,
+                method,
+                sign_target or path,
+                body,
+                ts=kw.pop("ts", self.now),
+                nonce=kw.pop("nonce", None),
+                ws=ws,
+                host=sign_host,
+            )
+        return self.c.request(method, path, content=body, headers=headers)
 
-    def register(self, delegation=DELEG1, ws=WS_A, pk=PK_B64, **kw):
-        body = json.dumps({"delegation": delegation, "owner_pk": pk}).encode()
-        return self.send("POST", f"/v1/ws/{ws}/register", body, ws=ws, **kw)
+    def register(self, card=CARD1, ws=WS_A, pk=PK_B64):
+        """The card as the hub hands it to publish (`PUT /v2/hub/cards/{ws}`)."""
+        body = json.dumps({"card": card, "pk_pub": pk}).encode()
+        return self.c.put(f"/v2/hub/cards/{ws}", content=body)
+
+    def bind(self, ws=WS_A, seq=1, wsk=None):
+        conn = db.connect(self.path)
+        try:
+            hub_path.accept_hub_card(conn, self.hub.card, self.now, True)
+            hub_path.accept_binding(
+                conn, ws, binding(wsk or self.wsk, self.hub, ws=ws, seq=seq), self.now, True
+            )
+        finally:
+            conn.close()
+
+    def admit(self, ws=WS_A):
+        r = self.register(ws=ws)
+        assert r.status_code == 200, r.text
+        self.bind(ws)
 
     def status(self, **kw):
         return self.send("GET", f"/v1/ws/{WS_A}/status", **kw)
@@ -118,7 +140,7 @@ class Env:
 def env(tmp_path):
     e = Env(tmp_path)
     e.allow()
-    assert e.register().status_code == 200
+    e.admit()
     return e
 
 
@@ -139,463 +161,6 @@ def test_vendored_proto_matches_relay_checkout_if_present():
     if not src or not pathlib.Path(src).exists():
         pytest.skip("set ORCH_RELAY_SRC=/path/to/orch-relay/src/orch_relay/proto/__init__.py")
     assert pathlib.Path(src).read_bytes() == (ROOT / "pubsrv/relay_proto.py").read_bytes()
-
-
-@pytest.mark.parametrize("case", VEC["card"]["cases"], ids=lambda c: c["name"])
-def test_card_vectors_with_vendored_code(case):
-    pk = bytes.fromhex(case["owner_pk_pub"])
-    got = proto.relay_accept_card(case["stored"], case["card"], pk)
-    assert got == case["expect"]
-
-
-# --- protocol vectors (12.1), same file orch-core P4 checks -------------------------------------
-
-
-@pytest.mark.parametrize("case", VEC["publish"]["cases"], ids=lambda c: c["name"])
-def test_publish_vectors_pure(case):
-    cards = {WS_A: CARD1["o"]["wsk_pub"]}
-    got = auth.publish_check(
-        case["headers"],
-        case["method"],
-        case["host"],
-        case["target"],
-        bytes.fromhex(case["body"]),
-        cards,
-        copy.deepcopy(case["nonces"]),
-        case["now_ms"],
-    )
-    assert got == case["expect"]
-
-
-def test_publish_vector_signed_bytes_and_headers():
-    c = VEC["publish"]["cases"][0]
-    h = c["headers"]
-    sb = auth.signed_bytes(
-        bytes.fromhex(h["Orch-Workspace"]),
-        int(h["Orch-Ts"]),
-        bytes.fromhex(h["Orch-Nonce"]),
-        c["method"],
-        c["host"],
-        c["target"],
-        bytes.fromhex(c["body"]),
-    )
-    assert sb.hex() == VEC["publish"]["signed_bytes"]
-    assert h == VEC["publish"]["headers"]
-
-
-@pytest.mark.parametrize("case", VEC["publish"]["cases"], ids=lambda c: c["name"])
-def test_publish_vectors_through_the_middleware(tmp_path, case):
-    """The same vectors, over HTTP: the refusal reasons must match. The vector paths are not
-    /v1/ws/ paths, so an accepted request ends in 404 not_found after authentication."""
-    e = Env(tmp_path)
-    e.allow()
-    assert e.register().status_code == 200
-    e.now = case["now_ms"]
-    for ws, nonces in case["nonces"].items():
-        for n, until in nonces.items():
-            e.sql("INSERT INTO nonces VALUES (?,?,?)", ws, n, until)
-    e.app.state.settings.api_host = case["host"]
-    path = case["target"].split("?")[0]
-    r = e.c.request(
-        case["method"], case["target"], content=bytes.fromhex(case["body"]), headers=case["headers"]
-    )
-    exp = case["expect"]
-    if exp["status"] == 200:
-        assert (r.status_code, err(r)) == (404, "not_found")
-    else:
-        assert (r.status_code, err(r)) == (exp["status"], exp["error"]), path
-        if "server_ms" in exp:
-            assert r.json()["server_ms"] == exp["server_ms"]
-
-
-# --- middleware: the 12.1 refusals --------------------------------------------------------------
-
-
-def test_valid_request(env):
-    r = env.status()
-    assert r.status_code == 200 and r.json() == {
-        "workspace": WS_A,
-        "status": "active",
-    }
-
-
-def test_replay_is_refused_once_accepted(env):
-    n = os.urandom(16)
-    assert env.status(nonce=n).status_code == 200
-    r = env.status(nonce=n)
-    assert (r.status_code, err(r)) == (401, "replay")
-
-
-def test_replay_of_identical_bytes_refused(env):
-    hdr = sign_headers(env.wsk, WS_A, "GET", HOST, f"/v1/ws/{WS_A}/status")
-    assert env.status(headers=hdr).status_code == 200
-    assert err(env.status(headers=hdr)) == "replay"
-
-
-def test_nonce_expires_after_240s_but_ts_is_stale_by_then(env):
-    n = os.urandom(16)
-    assert env.status(nonce=n).status_code == 200
-    env.now += 241_000
-    r = env.status(nonce=n, ts=NOW)
-    assert (r.status_code, err(r)) == (401, "stale_timestamp")
-
-
-@pytest.mark.parametrize(
-    "skew,ok", [(120_000, True), (-120_000, True), (121_000, False), (-121_000, False)]
-)
-def test_skew_window(env, skew, ok):
-    r = env.status(ts=NOW + skew)
-    if ok:
-        assert r.status_code == 200
-    else:
-        assert (r.status_code, err(r)) == (401, "stale_timestamp")
-        assert r.json()["server_ms"] == NOW
-
-
-def test_wrong_host_in_signature(env):
-    r = env.status(sign_host="pub.example.com")
-    assert (r.status_code, err(r)) == (401, "bad_signature")
-
-
-def test_host_header_is_not_trusted(env):
-    """Signed for the configured host, sent with another Host header: the signature decides (I6)."""
-    hdr = sign_headers(env.wsk, WS_A, "GET", HOST, f"/v1/ws/{WS_A}/status")
-    r = env.c.get(f"/v1/ws/{WS_A}/status", headers={**hdr, "Host": "evil.example"})
-    assert r.status_code == 200
-    hdr = sign_headers(env.wsk, WS_A, "GET", "evil.example", f"/v1/ws/{WS_A}/status")
-    r = env.c.get(f"/v1/ws/{WS_A}/status", headers={**hdr, "Host": "evil.example"})
-    assert err(r) == "bad_signature"
-
-
-def test_wrong_path(env):
-    r = env.status(sign_target=f"/v1/ws/{WS_A}/other")
-    assert (r.status_code, err(r)) == (401, "bad_signature")
-
-
-def test_wrong_query(env):
-    p = f"/v1/ws/{WS_A}/status"
-    assert env.send("GET", p + "?a=1", sign_target=p).status_code == 401
-    assert err(env.send("GET", p + "?a=1", sign_target=p)) == "bad_signature"
-    assert err(env.send("GET", p, sign_target=p + "?a=1")) == "bad_signature"
-    assert env.send("GET", p + "?a=1", sign_target=p + "?a=1").status_code == 200
-
-
-def test_target_is_not_normalised(env):
-    p = f"/v1/ws/{WS_A}/status"
-    # same route after decoding, different bytes on the wire: the signature covers the raw target
-    r = env.send("GET", f"/v1/ws/{WS_A}/%73tatus", sign_target=p)
-    assert err(r) == "bad_signature"
-    assert (
-        env.send(
-            "GET", f"/v1/ws/{WS_A}/%73tatus", sign_target=f"/v1/ws/{WS_A}/%73tatus"
-        ).status_code
-        == 200
-    )
-
-
-def test_wrong_method(env):
-    p = f"/v1/ws/{WS_A}/status"
-    hdr = sign_headers(env.wsk, WS_A, "POST", HOST, p)
-    assert err(env.c.get(p, headers=hdr)) == "bad_signature"
-
-
-def test_body_tamper(env):
-    p = f"/v1/ws/{WS_A}/status"
-    hdr = sign_headers(env.wsk, WS_A, "POST", HOST, p, b"one")
-    r = env.c.post(p, content=b"two", headers=hdr)
-    assert err(r) == "bad_signature"
-
-
-def test_bad_signature_other_key(env):
-    r = env.status(priv=_priv("wsk_b.sig"))
-    assert (r.status_code, err(r)) == (401, "bad_signature")
-
-
-def test_flipped_signature_bit(env):
-    hdr = sign_headers(env.wsk, WS_A, "GET", HOST, f"/v1/ws/{WS_A}/status")
-    sig = bytearray(proto.unb64u(hdr["Orch-Signature"]))
-    sig[5] ^= 1
-    hdr["Orch-Signature"] = proto.b64u(bytes(sig))
-    assert err(env.status(headers=hdr)) == "bad_signature"
-
-
-def test_bad_signature_does_not_fill_nonce_store(env):
-    before = env.sql("SELECT COUNT(*) FROM nonces")[0][0]
-    for _ in range(5):
-        env.status(priv=_priv("wsk_b.sig"))
-    assert env.sql("SELECT COUNT(*) FROM nonces")[0][0] == before
-
-
-@pytest.mark.parametrize(
-    "mut",
-    [
-        {"Orch-Nonce": "AB" * 16},
-        {"Orch-Nonce": "ab" * 15},
-        {"Orch-Ts": "01790000000000"},
-        {"Orch-Ts": "-1"},
-        {"Orch-Ts": "1.5"},
-        {"Orch-Workspace": WS_A.upper()},
-        {"Orch-Workspace": "zz"},
-        {"Orch-Signature": "!!"},
-        {"Orch-Signature": "AA"},
-    ],
-)
-def test_malformed_headers(env, mut):
-    hdr = sign_headers(env.wsk, WS_A, "GET", HOST, f"/v1/ws/{WS_A}/status")
-    hdr.update(mut)
-    r = env.status(headers=hdr)
-    assert (r.status_code, err(r)) == (400, "malformed")
-
-
-def test_missing_header_and_duplicated_header(env):
-    hdr = sign_headers(env.wsk, WS_A, "GET", HOST, f"/v1/ws/{WS_A}/status")
-    del hdr["Orch-Nonce"]
-    assert err(env.status(headers=hdr)) == "malformed"
-    hdr = sign_headers(env.wsk, WS_A, "GET", HOST, f"/v1/ws/{WS_A}/status")
-    r = env.c.get(
-        f"/v1/ws/{WS_A}/status",
-        headers=[(k, v) for k, v in hdr.items()] + [("Orch-Nonce", os.urandom(16).hex())],
-    )
-    assert (r.status_code, err(r)) == (400, "malformed")
-
-
-def test_no_headers_at_all_is_refused(env):
-    assert env.c.get(f"/v1/ws/{WS_A}/status").status_code == 400
-
-
-def test_check_order_malformed_before_stale_before_unknown_before_signature(env):
-    stranger = _priv("wsk_b.sig")
-    # stale + unknown workspace + bad signature: stale wins
-    r = env.send("GET", f"/v1/ws/{WS_B}/status", ws=WS_B, priv=stranger, ts=NOW + 500_000)
-    assert err(r) == "stale_timestamp"
-    # unknown workspace + bad signature: unknown wins
-    r = env.send("GET", f"/v1/ws/{WS_B}/status", ws=WS_B, priv=stranger)
-    assert err(r) == "unknown_workspace"
-    # replayed nonce + bad signature: the signature is checked first
-    n = os.urandom(16)
-    assert env.status(nonce=n).status_code == 200
-    assert err(env.status(nonce=n, priv=stranger)) == "bad_signature"
-
-
-def test_unknown_workspace(env):
-    r = env.send("GET", f"/v1/ws/{WS_B}/status", ws=WS_B, priv=_priv("wsk_b.sig"))
-    assert (r.status_code, err(r)) == (401, "unknown_workspace")
-
-
-def test_path_workspace_must_equal_signed_workspace(env):
-    env.allow(VEC["ids"]["person_bob"])
-    r = env.send("GET", f"/v1/ws/{WS_B}/status", ws=WS_A)
-    assert (r.status_code, err(r)) == (403, "wrong_workspace")
-    assert env.sql("SELECT COUNT(*) FROM nonces")[0][0] == 2  # register + this one (L2)
-
-
-def test_unknown_route_is_404_after_auth_and_unauthenticated_is_never_served(env):
-    assert env.send("GET", f"/v1/ws/{WS_A}/nope").status_code == 404
-    assert env.c.get("/docs").status_code == 400
-    assert env.c.get("/openapi.json").status_code == 400
-
-
-def _signed_big(env, method, path, size, ws=WS_A):
-    body = b"x" * size
-    hdr = sign_headers(env.wsk, ws, method, HOST, path, body)
-    return env.c.request(method, path, content=body, headers=hdr)
-
-
-def test_body_limits_are_per_route(env):
-    sid = "ab" * 16
-    file_path = f"/v1/ws/{WS_A}/shares/{sid}/files/a.txt"
-    # a known workspace: 1 MiB for ordinary routes, 26 MiB only for a file PUT
-    assert _signed_big(env, "POST", f"/v1/ws/{WS_A}/x", 1024 * 1024 + 1).status_code == 413
-    r = _signed_big(env, "PUT", file_path, 1024 * 1024 + 1)
-    assert r.status_code == 404  # size accepted (past auth), no such route yet
-    assert _signed_big(env, "PUT", file_path, 26 * 1024 * 1024 + 1).status_code == 413
-    # register is 64 KiB
-    assert _signed_big(env, "POST", f"/v1/ws/{WS_A}/register", 64 * 1024 + 1).status_code == 413
-    # a GET/POST to the file path is not a file PUT
-    assert _signed_big(env, "POST", file_path, 2 * 1024 * 1024).status_code == 413
-
-
-def test_unknown_workspace_gets_only_64k(tmp_path):
-    e = Env(tmp_path)
-    e.allow()
-    big = _signed_big(e, "POST", f"/v1/ws/{WS_A}/register", 64 * 1024 + 1)
-    assert big.status_code == 413
-
-
-def _asgi(app, scope_extra, headers, body=b""):
-    import asyncio
-
-    reads = []
-    out = []
-
-    async def receive():
-        reads.append(1)
-        return {"type": "http.request", "body": body, "more_body": False}
-
-    async def send(m):
-        out.append(m)
-
-    scope = {
-        "type": "http",
-        "method": "POST",
-        "path": f"/v1/ws/{WS_A}/x",
-        "raw_path": f"/v1/ws/{WS_A}/x".encode(),
-        "query_string": b"",
-        "headers": headers,
-        **scope_extra,
-    }
-    asyncio.run(app(scope, receive, send))
-    return reads, out
-
-
-@pytest.mark.parametrize("kind", ["malformed", "stale", "unknown"])
-def test_body_is_not_read_before_steps_1_to_3(env, kind):
-    hdr = sign_headers(env.wsk, WS_A, "POST", HOST, f"/v1/ws/{WS_A}/x")
-    if kind == "malformed":
-        del hdr["Orch-Nonce"]
-    if kind == "stale":
-        hdr = sign_headers(env.wsk, WS_A, "POST", HOST, f"/v1/ws/{WS_A}/x", ts=NOW + 500_000)
-    if kind == "unknown":
-        hdr = sign_headers(_priv("wsk_b.sig"), WS_B, "POST", HOST, f"/v1/ws/{WS_B}/x")
-    reads, out = _asgi(env.app, {}, [(k.lower().encode(), v.encode()) for k, v in hdr.items()])
-    assert reads == []
-    assert out[0]["status"] == (400 if kind == "malformed" else 401)
-
-
-def test_db_failure_fails_closed(env):
-    pathlib.Path(env.path).write_bytes(b"not a database" * 100)
-    for ext in ("-wal", "-shm"):
-        pathlib.Path(env.path + ext).unlink(missing_ok=True)
-    r = env.status()
-    assert r.status_code in (500, 503) and r.json()["error"] in ("unavailable", "internal")
-
-
-# --- admission: allowlist, block ----------------------------------------------------------------
-
-
-def test_register_requires_allowlisted_owner(tmp_path):
-    e = Env(tmp_path)
-    r = e.register()
-    assert (r.status_code, err(r)) == (401, "unknown_workspace")
-    assert e.sql("SELECT COUNT(*) FROM workspaces")[0][0] == 0
-    e.allow()
-    assert e.register().json() == {"workspace": WS_A, "result": "registered"}
-
-
-def test_unregistered_workspace_cannot_use_other_routes(tmp_path):
-    e = Env(tmp_path)
-    e.allow()
-    assert err(e.status()) == "unknown_workspace"
-
-
-def test_register_signature_must_match_delegation_key(tmp_path):
-    """Request signed by a key other than the delegation's wsk_pub -> 401, nothing bound."""
-    e = Env(tmp_path)
-    e.allow()
-    r = e.register(priv=_priv("wsk_b.sig"))
-    assert (r.status_code, err(r)) == (401, "bad_signature")
-    assert e.sql("SELECT COUNT(*) FROM workspaces")[0][0] == 0
-
-
-def test_register_delegation_for_another_workspace_refused(tmp_path):
-    """Delegation names WS_A but the path and signed header say WS_B."""
-    e = Env(tmp_path)
-    e.allow()
-    e.allow(ws=WS_B)
-    r = e.register(ws=WS_B)
-    assert (r.status_code, err(r)) == (400, "other_workspace")
-    assert e.sql("SELECT COUNT(*) FROM workspaces")[0][0] == 0
-
-
-def test_register_path_differs_from_signed_workspace_and_delegation(tmp_path):
-    """Header + delegation say WS_A, the path says WS_B."""
-    e = Env(tmp_path)
-    e.allow()
-    body = json.dumps({"delegation": DELEG1, "owner_pk": PK_B64}).encode()
-    hdr = sign_headers(e.wsk, WS_A, "POST", HOST, f"/v1/ws/{WS_B}/register", body)
-    r = e.c.request("POST", f"/v1/ws/{WS_B}/register", content=body, headers=hdr)
-    assert (r.status_code, err(r)) == (400, "other_workspace")
-    assert e.sql("SELECT COUNT(*) FROM workspaces")[0][0] == 0
-
-
-def test_register_header_differs_from_delegation_workspace(tmp_path):
-    """Path + header say WS_B, the delegation is for WS_A (also with a WS_B pre-bind)."""
-    e = Env(tmp_path)
-    e.allow(ws=WS_B)
-    r = e.register(ws=WS_B, priv=_priv("wsk_b.sig"))
-    assert (r.status_code, err(r)) == (400, "other_workspace")
-
-
-def test_register_tampered_delegation_refused(tmp_path):
-    e = Env(tmp_path)
-    e.allow()
-    bad = copy.deepcopy(DELEG1)
-    bad["o"]["wsk_pub"] = proto.b64u(bytes.fromhex(VEC["keys"]["wsk_b.sig"]["pub"]))
-    r = e.register(delegation=bad, priv=_priv("wsk_b.sig"))
-    assert r.status_code == 400 and (err(r), r.json()["reason"]) == (
-        "delegation_refused",
-        "bad_signature",
-    )
-    assert e.sql("SELECT COUNT(*) FROM workspaces")[0][0] == 0
-
-
-def test_register_delegation_naming_another_person_refused(tmp_path):
-    """Signed by the owner PK but owner_person_id is somebody else's."""
-    e = Env(tmp_path)
-    e.allow()
-    bad = make_delegation(owner_person_id=VEC["ids"]["person_bob"])
-    r = e.register(delegation=bad)
-    assert (r.status_code, err(r), r.json()["reason"]) == (
-        400,
-        "delegation_refused",
-        "other_person",
-    )
-
-
-def test_register_wrong_owner_pk_refused(tmp_path):
-    e = Env(tmp_path)
-    e.allow()
-    other = proto.b64u(bytes.fromhex(VEC["keys"]["wsk_a.sig"]["pub"]))
-    r = e.register(pk=other)
-    assert (r.status_code, err(r)) == (401, "unknown_workspace")  # person id not pre-bound (L3)
-    # pre-bound to that other person too: now the delegation does not verify under that PK
-    pid = proto.identifier("person", bytes.fromhex(VEC["keys"]["wsk_a.sig"]["pub"]))
-    e.allow(person=pid)
-    r = e.register(pk=other)
-    assert (r.status_code, err(r), r.json()["reason"]) == (
-        400,
-        "delegation_refused",
-        "bad_signature",
-    )
-    assert e.sql("SELECT COUNT(*) FROM workspaces")[0][0] == 0
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        b"{}",
-        b"[]",
-        b"not json",
-        b'{"delegation":{},"owner_pk":"x"}',
-        b'{"delegation":1,"owner_pk":"x"}',
-    ],
-)
-def test_register_malformed_body(tmp_path, body):
-    e = Env(tmp_path)
-    e.allow()
-    r = e.send("POST", f"/v1/ws/{WS_A}/register", body)
-    assert r.status_code == 400 and err(r) == "malformed"
-
-
-def test_register_extra_field_refused(tmp_path):
-    e = Env(tmp_path)
-    e.allow()
-    for extra in ({"x": 1}, {"card": CARD1}):
-        body = json.dumps({"delegation": DELEG1, "owner_pk": PK_B64, **extra}).encode()
-        assert err(e.send("POST", f"/v1/ws/{WS_A}/register", body)) == "malformed"
-    body = json.dumps({"card": CARD1, "owner_pk": PK_B64}).encode()  # the old shape
-    assert err(e.send("POST", f"/v1/ws/{WS_A}/register", body)) == "malformed"
-    assert e.sql("SELECT COUNT(*) FROM workspaces")[0][0] == 0
 
 
 def test_block_bites_on_the_next_request(env):
@@ -630,7 +195,7 @@ def test_removing_owner_from_allowlist_bites_on_the_next_request(env):
 
 
 def test_identical_reregister_is_unchanged(env):
-    assert env.register().json() == {"workspace": WS_A, "result": "unchanged"}
+    assert env.register().json() == {"ok": True}  # the same card again: a no-op
     assert env.sql("SELECT COUNT(*) FROM workspaces")[0][0] == 1
 
 
@@ -646,29 +211,11 @@ def test_stored_binding_fields(env):
     assert "card_seq" not in row.keys() and "card_json" not in row.keys()  # noqa: SIM118
 
 
-def test_changed_delegation_is_409_even_if_valid_and_newer(env):
-    before = tuple(env.sql("SELECT * FROM workspaces")[0])
-    newer = make_delegation(issued_ms=DELEG1["o"]["issued_ms"] + 1)
-    r = env.register(delegation=newer)
-    assert (r.status_code, err(r)) == (409, "delegation_changed")
-    other_key = make_delegation(wsk_pub=proto.b64u(bytes.fromhex(VEC["keys"]["wsk_b.sig"]["pub"])))
-    r = env.register(delegation=other_key)
-    assert (r.status_code, err(r)) == (409, "delegation_changed")
-    assert tuple(env.sql("SELECT * FROM workspaces")[0]) == before
-
-
 def test_not_bound_unknown_workspace_with_valid_delegation_is_401(tmp_path):
     e = Env(tmp_path)
     e.allow(ws=None)
     r = e.register()
     assert (r.status_code, err(r)) == (401, "unknown_workspace")
-
-
-def test_only_unbind_releases_the_binding(env):
-    assert err(env.register(delegation=make_delegation(issued_ms=1))) == "delegation_changed"
-    cli.main(["admin", "--data", env.data, "ws", "unbind", WS_A])
-    cli.main(["admin", "--data", env.data, "ws", "allow", WS_A, PERSON])
-    assert env.register(delegation=make_delegation(issued_ms=1)).json()["result"] == "registered"
 
 
 def test_older_data_dir_refuses_to_start(tmp_path):
@@ -835,16 +382,6 @@ def test_all_unknown_register_failures_look_alike(tmp_path):
     )
 
 
-def test_delegation_is_not_verified_for_a_non_allowlisted_owner(tmp_path, monkeypatch):
-    from pubsrv import registry
-
-    e = Env(tmp_path)
-    monkeypatch.setattr(
-        registry.proto, "verify_delegation", lambda *a: pytest.fail("verify_delegation ran")
-    )
-    assert err(e.register()) == "unknown_workspace"
-
-
 def test_admin_ws_allow_and_unbind(tmp_path):
     e = Env(tmp_path)
     d = e.data
@@ -862,28 +399,10 @@ def test_admin_ws_allow_and_unbind(tmp_path):
     assert e.sql("SELECT COUNT(*) FROM workspaces")[0][0] == 0
     assert e.sql("SELECT COUNT(*) FROM prebinds")[0][0] == 0
     assert err(e.status()) == "unknown_workspace"
-    assert err(e.register()) == "unknown_workspace"  # needs a new allow
+    assert (
+        err(e.register(CARD2)) == "unknown_workspace"
+    )  # needs a new allow (and a newer card than the floor)
     assert cli.main(["admin", "--data", d, "ws", "unbind", WS_A]) == 0  # idempotent
-
-
-def test_nonce_survives_exactly_until_the_end_of_retention(env):
-    """L1/edge vector: a nonce recorded at t0 with a ts 120 s ahead is still a replay at exactly
-    t0+240000 (the ts is then still inside the window)."""
-    extra = json.loads((ROOT / "tests/vectors/publish_v2_extra.json").read_text())
-    for c in extra["cases"]:
-        cards = {WS_A: CARD1["o"]["wsk_pub"]}
-        nonces = copy.deepcopy(c["nonces"])
-        got = auth.publish_check(
-            c["headers"],
-            c["method"],
-            c["host"],
-            c["target"],
-            bytes.fromhex(c["body"]),
-            cards,
-            nonces,
-            c["now_ms"],
-        )
-        assert got == c["expect"], c["name"]
 
 
 def test_db_nonce_purge_is_strictly_before_now(env):
@@ -994,7 +513,7 @@ def test_unbind_and_reregister_with_new_card_between_admission_and_body_refuses(
             "INSERT INTO workspaces(workspace_id, wsk_pub, owner_person_id, owner_pk,"
             " delegation_json, created_ms, updated_ms) VALUES (?,?,?,?,?,?,?)",
             WS_A,
-            "another-key",
+            proto.b64u(bytes.fromhex(VEC["keys"]["wsk_b.sig"]["pub"])),
             PERSON,
             PK_B64,
             "{}",
@@ -1037,7 +556,9 @@ def test_reregister_after_unbind_does_not_see_old_tombstones(env):
     )
     assert cli.main(["admin", "--data", env.data, "ws", "unbind", WS_A]) == 0
     assert cli.main(["admin", "--data", env.data, "ws", "allow", WS_A, PERSON]) == 0
-    assert env.register().status_code == 200
+    assert (
+        env.register(CARD2).status_code == 200
+    )  # a newer card than the floor (the same one is a replay)
     assert env.sql("SELECT COUNT(*) FROM shares WHERE owner_ws=?", WS_A)[0][0] == 0
     assert env.sql("SELECT state FROM shares WHERE id='old'")[0][0] == "revoked"
 
@@ -1049,7 +570,7 @@ def test_unbind_keeps_nonces_so_a_replay_after_reregister_is_refused(env):
     cli.main(["admin", "--data", env.data, "ws", "unbind", WS_A])
     assert env.sql("SELECT COUNT(*) FROM nonces WHERE ws=?", WS_A)[0][0] == n
     cli.main(["admin", "--data", env.data, "ws", "allow", WS_A, PERSON])
-    assert env.register().status_code == 200
+    assert env.register(CARD2).status_code == 200
     assert err(env.status(headers=hdr)) == "replay"
 
 
