@@ -104,21 +104,16 @@ def run(check, a):
         "body": bytes.fromhex(r["body_hex"]),
         "access": r.get("access"),
     }
-    if a.get("path") == "direct":
-        # the direct v2 12.1 path (auth.py) must refuse a hub-path signature
-        res = auth.publish_check(
-            r["headers"], r["method"], r["host"], r["target"], req["body"],
-            {a["workspace_id"]: a["cards"][a["workspace_id"]]["wsk_pub"]}, {}, now,
-        )  # fmt: skip
-        if res["status"] != 200:
-            raise H.Refused(res["error"])
-        return {"workspace": res["workspace"]}
     nonces = auth.MemoryNonces({k: dict(v) for k, v in a.get("nonces", {}).items()})
     return H.check_hub_publish(req, st, nonces, now, dev)
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c["name"])
 def test_vector(case):
+    if case["args"].get("path") == "direct":
+        pytest.skip(
+            "V3-D36: there is no direct path any more; tests/test_hub_path_http.py covers hub_required"
+        )
     try:
         got = {"ok": run(case["check"], case["args"])}
     except H.Refused as r:
@@ -127,9 +122,38 @@ def test_vector(case):
 
 
 def test_every_relevant_case_is_run():
-    assert len(CASES) == 17 + 25 + 26 + 4 + 6 + 3 + 48 + 2 + 5
+    assert len(CASES) == 17 + 25 + 26 + 4 + 6 + 3 + 47 + 2 + 5
 
 
 def test_labels_match_the_contract():
     for k, v in H.LABELS.items():
         assert VEC["labels"][k].encode() == v
+
+
+CARD_CASES = [c for c in VEC["cases"] if c["check"] == "ws_card_admission"]
+
+
+@pytest.mark.parametrize("case", CARD_CASES, ids=lambda c: c["name"])
+def test_card_admission_vector_over_the_real_route(tmp_path, case):
+    """protocol 11.2 "Admission through the hub": the same cases, through `PUT /v2/hub/cards/{ws}`."""
+    from tests.test_publish_api_auth import Env
+
+    a = case["args"]
+    e = Env(tmp_path)
+    e.now = a["now_ms"]
+    card_owner = a["card"]["delegation"]["o"]["owner_person_id"]
+    e.sql("INSERT OR IGNORE INTO owners VALUES (?,?)", card_owner, e.now)
+    if a["prebound"]:
+        e.sql(
+            "INSERT OR REPLACE INTO prebinds VALUES (?,?,?)", a["workspace_id"], card_owner, e.now
+        )
+    if a.get("floor") is not None:
+        e.sql("INSERT INTO card_floor VALUES (?,?)", a["workspace_id"], a["floor"])
+    r = e.c.put(
+        f"/v2/hub/cards/{a['workspace_id']}",
+        content=json.dumps({"card": a["card"], "pk_pub": a["pk_pub"]}).encode(),
+    )
+    if "ok" in case["expect"]:
+        assert (r.status_code, r.json()) == (200, {"ok": True})
+    else:
+        assert r.json() == case["expect"], r.text

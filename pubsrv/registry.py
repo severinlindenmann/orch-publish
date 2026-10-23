@@ -1,4 +1,4 @@
-"""Workspace admission (design 2.6b): the self-presented delegation, the owner allowlist, block."""
+"""Workspace admission (design 2.6b): the delegation of a PK-verified card (hub `card_put`), the owner allowlist, block."""
 
 import sqlite3
 
@@ -6,24 +6,6 @@ from . import relay_proto as proto
 from .auth import Refusal
 
 ID32 = r"[0-9a-f]{32}"
-
-
-def parse_register_body(raw):
-    """Strict body: exactly {delegation, owner_pk}. Returns (delegation, owner_pk_bytes)."""
-    try:
-        body = proto.parse_json(raw)
-        if (
-            not isinstance(body, dict)
-            or set(body) != {"delegation", "owner_pk"}
-            or not isinstance(body["delegation"], dict)
-        ):
-            raise ValueError("shape")
-        pk = proto.unb64u(body["owner_pk"], 65)
-        if not proto.SUITE.pub_ok(pk):
-            raise ValueError("pk")
-    except (ValueError, TypeError):
-        raise Refusal(400, "malformed") from None
-    return body["delegation"], pk
 
 
 def check_delegation(delegation, pk, ws_hex, path_ws=None):
@@ -37,11 +19,6 @@ def check_delegation(delegation, pk, ws_hex, path_ws=None):
     if o["workspace_id"] != ws_hex or (path_ws is not None and path_ws != ws_hex):
         raise Refusal(400, "other_workspace")
     return o
-
-
-def delegation_key(delegation, pk, ws_hex, path_ws):
-    """For an unknown workspace: the wsk_pub the request signature must verify under (step 3)."""
-    return check_delegation(delegation, pk, ws_hex, path_ws)["wsk_pub"]
 
 
 def require_prebound(conn, ws_hex, person_id):
@@ -87,16 +64,21 @@ def check_admitted(conn, row):
         raise Refusal(403, "owner_not_allowed")
 
 
-def register(conn, ws_hex, delegation, pk, now_ms):
+def register(conn, ws_hex, delegation, pk, now_ms, guard=None, after=None):
     """Bind a workspace to its genesis delegation (design 2.6b). Everything is decided inside one
     BEGIN IMMEDIATE transaction on freshly read state. The binding is permanent: a byte-identical
     delegation is "unchanged", any other one is 409 delegation_changed; only an admin unbind
-    releases it. Returns "registered" | "unchanged"."""
+    releases it. Returns "registered" | "unchanged".
+
+    `guard(conn, admitted)` runs right after BEGIN IMMEDIATE and `after(conn)` right before COMMIT, so a caller's own
+    checks and writes share this transaction (the hub card route keeps its freshness floor there)."""
     o = check_delegation(delegation, pk, ws_hex, ws_hex)
     blob = proto.cj(delegation).decode()
     conn.execute("BEGIN IMMEDIATE")
     try:
         row = get_workspace(conn, ws_hex)
+        if guard is not None:
+            guard(conn, row is not None)
         if row is None:
             # checked on freshly read state, inside the lock (M2)
             require_prebound(conn, ws_hex, o["owner_person_id"])
@@ -119,6 +101,8 @@ def register(conn, ws_hex, delegation, pk, now_ms):
             if row["delegation_json"] != blob:
                 raise Refusal(409, "delegation_changed")
             outcome = "unchanged"
+        if after is not None:
+            after(conn)
         conn.execute("COMMIT")
         return outcome
     except BaseException:

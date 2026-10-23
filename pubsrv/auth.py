@@ -1,28 +1,17 @@
-"""Signed-request check, protocol-v2 section 12.1 (orch-publish).
+"""Request header syntax and the nonce store (protocol-v2 section 12.1, as used by the hub path, protocol 11).
 
-Order (exact):
-  1 header syntax                 -> 400 malformed
-  2 |now - ts| <= 120 s           -> 401 stale_timestamp (+ server_ms)
-  3 the workspace's card is known -> 401 unknown_workspace
-  4 the signature                 -> 401 bad_signature
-  5 the nonce is unseen           -> 401 replay; then it is recorded for 240 s
-The signature comes before the nonce store, so junk cannot fill it. Policy checks that are not part of
-12.1 (blocked workspace, owner no longer on the allowlist, path workspace) come after step 5 (L2): the
-caller is authenticated, and a refused request still spends its nonce, so a refused request can never be
-replayed as a probe. Steps 1-3 run before the body is read (M1). An expired nonce is purged when
+Steps 1 (header syntax -> 400 malformed) and 2 (|now - ts| <= 120 s -> 401 stale_timestamp, +server_ms) run here before
+the body is read (M1); the signatures and the order of the rest are `hub_path.check_hub_publish`. There is no direct
+signature check any more: a request without `Orch-Hub` is refused (V3-D36). An expired nonce is purged when
 until_ms < now (L1), so a replay exactly at the end of retention is still a replay.
 """
 
-import hashlib
 import re
-import struct
 
 from . import relay_proto as proto
 
 WINDOW_MS = 120_000
 NONCE_RETENTION_MS = 2 * WINDOW_MS
-LABEL = "orch/v2/publish|"  # sig_publish (protocol section 3)
-SUITE_ID = 2  # relay_proto implements suite 2 (P-256) only; other suites are refused as unknown
 _TS = re.compile(r"0|[1-9][0-9]{0,15}")
 
 
@@ -40,27 +29,6 @@ class Credentials:
 
     def __init__(self, ws, ts, nonce, sig):
         self.ws, self.ts, self.nonce, self.sig = ws, ts, nonce, sig
-
-
-def _lp16(b):
-    if len(b) >= 1 << 16:
-        raise ValueError("too long")
-    return struct.pack(">H", len(b)) + b
-
-
-def signed_bytes(ws, ts_ms, nonce, method, host, target, body):
-    """The exact bytes of 12.1. ws and nonce are 16 raw bytes."""
-    return (
-        LABEL.encode("ascii")
-        + bytes([SUITE_ID])
-        + ws
-        + struct.pack(">Q", ts_ms)
-        + nonce
-        + _lp16(method.encode("ascii"))
-        + _lp16(host.encode("ascii"))
-        + _lp16(target.encode("ascii"))
-        + hashlib.sha256(body).digest()
-    )
 
 
 def step1_headers(headers):
@@ -81,16 +49,6 @@ def step1_headers(headers):
 def step2_window(cred, now_ms):
     if abs(now_ms - cred.ts) > WINDOW_MS:
         raise Refusal(401, "stale_timestamp", server_ms=now_ms)
-
-
-def step4_signature(cred, wsk_pub_b64u, method, host, target, body):
-    try:
-        wsk = proto.unb64u(wsk_pub_b64u, 65)
-        msg = signed_bytes(cred.ws, cred.ts, cred.nonce, method, host, target, body)
-    except (ValueError, TypeError, UnicodeError):
-        raise Refusal(401, "bad_signature") from None
-    if not proto.SUITE.verify(wsk, cred.sig, msg):
-        raise Refusal(401, "bad_signature")
 
 
 class MemoryNonces:
@@ -137,24 +95,3 @@ class DbNonces:
         except BaseException:
             c.execute("ROLLBACK")
             raise
-
-
-def step5_nonce(cred, nonces, now_ms):
-    if not nonces.record(cred.ws.hex(), cred.nonce.hex(), now_ms):
-        raise Refusal(401, "replay")
-
-
-def publish_check(headers, method, host, target, body, cards, nonces, now_ms):
-    """Pure 12.1 check against {ws hex: wsk_pub b64u} and a nonce dict; same shape as the protocol
-    reference `publish_check`, used to run the shared vectors. Returns the reference's result dict."""
-    try:
-        cred = step1_headers(headers)
-        step2_window(cred, now_ms)
-        wsk = cards.get(cred.ws.hex())
-        if wsk is None:
-            raise Refusal(401, "unknown_workspace")
-        step4_signature(cred, wsk, method, host, target, body)
-        step5_nonce(cred, MemoryNonces(nonces), now_ms)
-    except Refusal as r:
-        return {"status": r.status, "error": r.error, **r.extra}
-    return {"status": 200, "workspace": cred.ws.hex()}

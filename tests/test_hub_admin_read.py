@@ -5,7 +5,8 @@ import pytest
 
 from pubsrv import hub_admin_read as R
 from pubsrv import hub_path as H
-from tests.test_hub_path_http import Hub, bound, conn_of, sign, unbound, wsk_a
+from tests.hub_helpers import Hub, sign, unbound
+from tests.test_hub_path_http import bound, conn_of, wsk_a
 from tests.test_publish_api_auth import NOW, WS_A, WS_B, Env
 
 SECRETS = ("TICKET-SECRET", "HASH-SECRET")

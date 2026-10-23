@@ -1,11 +1,12 @@
-"""FastAPI app + the signed-request middleware (protocol-v2 section 12.1, design section 3 I3-I7)."""
+"""FastAPI app + the signed-request middleware (hub protocol section 11, design section 3 I3-I7): every request comes
+through a hub (`Orch-Hub`); a request without one is refused, there is no direct path (V3-D36)."""
 
 import json
 import re
 import sqlite3
 import time
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from . import auth, db, hub_admin, hub_path, registry, shares
@@ -14,7 +15,6 @@ from .auth import Refusal
 
 MAX_FILE_BODY = 26 * 1024 * 1024  # design I14: 25 MB per file PUT plus slack; known workspaces only
 MAX_BODY = 1024 * 1024  # any other route of a known workspace (manifests, commit, ...)
-MAX_REGISTER_BODY = 64 * 1024  # register, and anything from a workspace not bound yet
 _FILE_ROUTE = re.compile(rf"/v1/ws/{registry.ID32}/shares/[0-9a-f]{{32}}/files/.+")
 _WS_PATH = re.compile(rf"/v1/ws/({registry.ID32})(/.*)?")
 _HOST = re.compile(r"[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[1-9][0-9]{0,4})?|\[::1\](:[1-9][0-9]{0,4})?")
@@ -157,69 +157,40 @@ class SignedRequestMiddleware:
             raise Refusal(400, "malformed") from None
         c.method = scope["method"]
         c.hdrs, c.path = raw_headers, scope["path"]
-        # A request with Orch-Hub / Orch-Hub-Signature is on the hub path (protocol 11); without them it is the
-        # direct v2 path, unchanged. Half a hub header pair is ambiguous, so it is malformed.
+        # Every request is on the hub path (protocol 11). Without Orch-Hub / Orch-Hub-Signature it is refused: there
+        # is no direct path (V3-D36). Half a hub header pair is ambiguous, so it is malformed.
         hub_hdrs = {"orch-hub", "orch-hub-signature"} & set(raw_headers)
-        if hub_hdrs and len(hub_hdrs) != 2:
+        if not hub_hdrs:
+            raise Refusal(403, "hub_required")
+        if len(hub_hdrs) != 2:
             raise Refusal(400, "malformed")
-        c.hub = raw_headers["orch-hub"] if hub_hdrs else None
-        if c.hub is not None:
-            try:  # 1 (hub syntax, approval strictly parsed, ASCII method/host/target) and 2
-                parsed = hub_path.parse_headers(raw_headers, c.method, s.api_host, c.target)
-                hub_path.check_window(parsed["ts"], c.now)
-            except hub_path.Refused as r:
-                raise r.refusal() from None
+        c.hub = raw_headers["orch-hub"]
+        try:  # 1 (hub syntax, approval strictly parsed, ASCII method/host/target) and 2
+            parsed = hub_path.parse_headers(raw_headers, c.method, s.api_host, c.target)
+            hub_path.check_window(parsed["ts"], c.now)
+        except hub_path.Refused as r:
+            raise r.refusal() from None
         c.cred = auth.step1_headers(raw_headers)  # 1
         auth.step2_window(c.cred, c.now)  # 2
         c.ws_hex = c.cred.ws.hex()
         c.m = _WS_PATH.fullmatch(scope["path"])
-        c.register = (
-            c.hub is None and c.method == "POST" and c.m is not None and c.m.group(2) == "/register"
-        )
         conn = db.connect(s.db_path)
         try:
             c.row = registry.get_workspace(conn, c.ws_hex)
         finally:
             conn.close()
-        if c.row is not None and not c.register:
-            is_file_put = c.method == "PUT" and _FILE_ROUTE.fullmatch(scope["path"]) is not None
-            c.limit = MAX_FILE_BODY if is_file_put else MAX_BODY
-        elif c.row is None and not c.register:
+        if c.row is None:
             raise Refusal(401, "unknown_workspace")  # 3, before any body byte is read
-        else:
-            c.limit = MAX_REGISTER_BODY  # register, and an unknown workspace asking to register
+        is_file_put = c.method == "PUT" and _FILE_ROUTE.fullmatch(scope["path"]) is not None
+        c.limit = MAX_FILE_BODY if is_file_put else MAX_BODY
         return c
 
     def _verify(self, c, body):
-        s = self.s
-        conn = db.connect(s.db_path)
+        conn = db.connect(self.s.db_path)
         try:
-            if c.hub is not None:
-                return self._verify_hub(c, body, conn)
-            if c.row is not None:
-                wsk = c.row[
-                    "wsk_pub"
-                ]  # 3: a known workspace is checked against the stored key only
-            else:
-                delegation, pk = registry.parse_register_body(body)
-                # L3: cheap admission test first; the same 401 whatever the reason, so the answer
-                # does not reveal which owners or workspaces are known
-                registry.require_prebound(conn, c.ws_hex, proto.identifier("person", pk))
-                # 3: the key is the one the owner's signed delegation names (design 2.6b)
-                wsk = registry.delegation_key(delegation, pk, c.ws_hex, c.m.group(1))
-            auth.step4_signature(c.cred, wsk, c.method, s.api_host, c.target, body)  # 4
-            auth.step5_nonce(c.cred, auth.DbNonces(conn), c.now)  # 5 (L2: before policy refusals)
-            if c.row is not None:
-                # the row was read before the (awaited) body read: re-read it now, so an unbind,
-                # re-register or block in between refuses this request
-                registry.require_binding(conn, c.ws_hex, c.row["wsk_pub"])
-            if c.m is not None and c.m.group(1) != c.ws_hex:
-                raise Refusal(403, "wrong_workspace")  # I3: the path workspace is the signed one
-            if c.m is None:
-                raise Refusal(404, "not_found")  # authenticated, but not a route this server has
+            return self._verify_hub(c, body, conn)
         finally:
             conn.close()
-        return c.ws_hex
 
     def _verify_hub(self, c, body, conn):
         """Protocol 11.2 steps 3-9 on the hub path (1-2 ran in `_admit`); policy checks come after, as on the
@@ -244,8 +215,8 @@ class SignedRequestMiddleware:
         registry.require_binding(conn, c.ws_hex, c.row["wsk_pub"])
         if c.m is not None and c.m.group(1) != c.ws_hex:
             raise Refusal(403, "wrong_workspace")  # I3
-        if c.m is None or c.m.group(2) == "/register":
-            raise Refusal(404, "not_found")  # a hub never registers a workspace
+        if c.m is None:
+            raise Refusal(404, "not_found")
         return c.ws_hex
 
 
@@ -254,24 +225,6 @@ def create_app(data_dir, api_host, clock=None, dev_mode=False):
     db.init(settings.db_path)
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.state.settings = settings
-
-    @app.post("/v1/ws/{ws}/register")
-    async def register(ws: str, request: Request):
-        raw = await request.body()
-        if len(raw) > MAX_REGISTER_BODY:
-            return JSONResponse({"error": "too_large"}, 413, _HEADERS)
-        try:
-            delegation, pk = registry.parse_register_body(raw)
-            conn = db.connect(settings.db_path)
-            try:
-                outcome = registry.register(conn, ws, delegation, pk, settings.clock())
-            finally:
-                conn.close()
-        except Refusal as r:
-            return JSONResponse(r.body(), r.status, _HEADERS)
-        except (sqlite3.Error, OSError):
-            return JSONResponse({"error": "unavailable"}, 503, _HEADERS)
-        return JSONResponse({"workspace": ws, "result": outcome}, 200, _HEADERS)
 
     @app.get("/v1/ws/{ws}/status")
     async def status(ws: str):
