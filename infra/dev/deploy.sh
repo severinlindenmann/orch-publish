@@ -4,7 +4,7 @@
 # Run from the dev machine: infra/dev/deploy.sh      (modeled on orch-relay infra/dev/deploy.sh)
 # Refuses a dirty git tree unless ORCH_DEPLOY_ALLOW_DIRTY=1 (release is then named ...-dirty-<hash>).
 # The units (orch-publish-api, orch-publish-share) come from the orch-dev-kit provisioning scripts.
-# Health: the API has no unauthenticated route, so a signed-route probe must answer 400 (no signature headers), the
+# Health: the API has no unauthenticated route, so a probe without hub headers must answer 403 hub_required (V3-D36), the
 # share server must answer 404 for an unknown share. A failed check rolls back to the previous release.
 set -euo pipefail
 
@@ -86,7 +86,7 @@ probe() { # port path want-code
 }
 check_all() {
     local rc=0
-    probe 8103 /v1/ws/00000000000000000000000000000000/status 400 || rc=1
+    probe 8103 /v1/ws/00000000000000000000000000000000/status 403 || rc=1
     probe 8104 /s/00000000000000000000000000000000 404 || rc=1
     return "$rc"
 }
