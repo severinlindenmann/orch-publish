@@ -14,7 +14,6 @@ out. Rate limiting is hardening. Success is `200 {"ok": true}` and an identical 
 is `{"error": code}` with the status of hub_path.STATUS. Nothing but the code is ever returned.
 """
 
-import hashlib
 import json
 import re
 import sqlite3
@@ -113,40 +112,27 @@ def _accept_workspace_card(conn, ws, obj, now):
     if res["ok"]["workspace_id"] != ws:
         raise H.Refused("other_workspace")
     o = res["ok"]
-    digest = hashlib.sha256(proto.cj(obj["card"])).hexdigest()
 
     def guard(conn, admitted):
-        # Freshness (v2 card update rules, protocol.md 16 #18): card_seq never goes back. The highest ever admitted is
-        # kept across an unbind, so an old card cannot re-register a workspace. The very same card again is a no-op
-        # only while the workspace is still admitted (a retry after a lost answer). Read inside the write lock.
+        # card_seq never goes back (v2 card update rules, protocol.md 16 #18): the highest ever admitted is kept across
+        # an unbind and read inside the write lock. Nothing else is checked for freshness: publish stores only the
+        # permanent delegation, so an old card of the same workspace carries nothing new.
         floor = conn.execute(
-            "SELECT card_seq, card_hash FROM card_floor WHERE workspace_id=?", (ws,)
+            "SELECT card_seq FROM card_floor WHERE workspace_id=?", (ws,)
         ).fetchone()
-        if floor is not None:
-            if o["card_seq"] < floor["card_seq"]:
-                raise H.Refused("stale_card")
-            if o["card_seq"] == floor["card_seq"] and (
-                not admitted or digest != floor["card_hash"]
-            ):
-                raise H.Refused("stale_card")
-        if not admitted and not now - CARD_MAX_AGE_MS <= o["issued_ms"] <= now + CARD_SKEW_MS:
-            raise H.Refused("stale_card")  # a new admission needs a card issued recently
+        if floor is not None and o["card_seq"] < floor["card_seq"]:
+            raise H.Refused("stale_card")
 
     def after(conn):
         conn.execute(
-            "INSERT INTO card_floor(workspace_id, card_seq, card_hash) VALUES (?,?,?)"
-            " ON CONFLICT(workspace_id) DO UPDATE SET card_seq=excluded.card_seq, card_hash=excluded.card_hash"
+            "INSERT INTO card_floor(workspace_id, card_seq) VALUES (?,?)"
+            " ON CONFLICT(workspace_id) DO UPDATE SET card_seq=excluded.card_seq"
             " WHERE excluded.card_seq > card_floor.card_seq",
-            (ws, o["card_seq"], digest),
+            (ws, o["card_seq"]),
         )
 
     registry.register(conn, ws, obj["card"]["delegation"], pk, now, guard=guard, after=after)
 
-
-CARD_MAX_AGE_MS = (
-    30 * 24 * 3600 * 1000
-)  # a card that admits a workspace for the first time was issued within 30 days
-CARD_SKEW_MS = 120_000
 
 _CARD_REFUSALS = frozenset(
     [

@@ -118,15 +118,7 @@ def unbind(e, ws=WS_A):
     e.allow()  # the admin pre-binds it again
 
 
-def test_replay_of_the_same_card_after_unbind_is_refused(env):
-    assert put(env, WS_A).status_code == 200
-    unbind(env)
-    r = put(env, WS_A)
-    assert (r.status_code, r.json()["error"]) == (409, "stale_card")
-    assert rows(env) == []
-
-
-def test_older_card_after_unbind_is_refused_and_a_fresh_one_accepted(env):
+def test_older_card_after_unbind_is_refused_and_a_newer_one_accepted(env):
     assert put(env, WS_A, CARD2).status_code == 200  # card_seq 2 is the floor
     unbind(env)
     assert put(env, WS_A, CARD1).json()["error"] == "stale_card"  # card_seq 1 < 2
@@ -139,15 +131,6 @@ def test_older_card_after_unbind_is_refused_and_a_fresh_one_accepted(env):
 def test_older_card_while_admitted_is_refused(env):
     assert put(env, WS_A, CARD2).status_code == 200
     assert put(env, WS_A, CARD1).json()["error"] == "stale_card"
-
-
-def test_a_card_too_old_cannot_admit(tmp_path):
-    e = Env(tmp_path)
-    e.allow()
-    e.now = NOW + 31 * 24 * 3600 * 1000
-    r = put(e, WS_A)
-    assert (r.status_code, r.json()["error"]) == (409, "stale_card")
-    assert rows(e) == []
 
 
 def test_concurrent_old_and_new_card_admissions_leave_the_floor_at_the_new_one(env):
@@ -173,3 +156,20 @@ def test_concurrent_old_and_new_card_admissions_leave_the_floor_at_the_new_one(e
         assert env.sql("SELECT card_seq FROM card_floor")[0][0] == 3  # never left at the old card
         assert put(env, WS_A, CARD1).status_code == 409  # and the old card is refused afterwards
         assert 200 in results
+
+
+def test_same_card_after_unbind_and_a_new_prebind_is_admitted_again(env):
+    """A workspace's card never changes in practice (core builds it once): the admin's unbind + pre-bind is the gate."""
+    assert put(env, WS_A).status_code == 200
+    unbind(env)
+    assert put(env, WS_A).status_code == 200
+    assert len(rows(env)) == 1
+
+
+def test_an_old_card_is_admitted_the_first_time(tmp_path):
+    e = Env(tmp_path)
+    e.allow()
+    e.now = (
+        NOW + 400 * 24 * 3600 * 1000
+    )  # no age limit: the delegation is permanent and is all publish keeps
+    assert put(e, WS_A).status_code == 200

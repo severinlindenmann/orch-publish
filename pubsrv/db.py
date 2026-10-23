@@ -41,8 +41,7 @@ CREATE TABLE IF NOT EXISTS nonces(
 CREATE INDEX IF NOT EXISTS nonces_until ON nonces(until_ms);
 CREATE TABLE IF NOT EXISTS card_floor(
   workspace_id TEXT PRIMARY KEY,
-  card_seq INTEGER NOT NULL,
-  card_hash TEXT NOT NULL
+  card_seq INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS hub_bindings(
   workspace_id TEXT PRIMARY KEY,  -- no FK: the unbound record outlives an unbind/re-register of the workspace
