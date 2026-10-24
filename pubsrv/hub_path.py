@@ -64,6 +64,7 @@ STATUS = {
     "stale_binding": 409,
     "stale_card": 409,
     "reader_downgrade": 409,
+    "held_card_invalid": 409,
     "stale_op_cert": 409,
 }
 
@@ -704,10 +705,23 @@ def held_hub_card(conn, hub_hex, now_ms, dev_mode):
     row = conn.execute("SELECT card_json FROM hub_cards WHERE hub_id=?", (hub_hex,)).fetchone()
     if row is None:
         return None
-    return verify_card(
-        proto.parse_json(row["card_json"].encode()), now_ms, dev_mode,
-        revoked_op_certs=revoked_op_certs(conn, hub_hex),
-    )  # fmt: skip
+    return _verify_stored(row, now_ms, dev_mode, revoked_op_certs=revoked_op_certs(conn, hub_hex))
+
+
+def _verify_stored(row, now_ms, dev_mode, **kw):
+    """Verify a stored card. A stored card that no longer verifies because of its shape (for example one stored
+    before a field was added) is `held_card_invalid`, a specific refusal: operators reset the stored card."""
+    try:
+        card = proto.parse_json(row["card_json"].encode())
+        return verify_card(
+            card, now_ms if now_ms is not None else card["o"]["issued_ms"], dev_mode, **kw
+        )
+    except Refused as r:
+        if r.code in ("malformed", "wrong_suite"):
+            raise Refused("held_card_invalid") from r
+        raise
+    except (KeyError, TypeError, ValueError) as e:
+        raise Refused("held_card_invalid") from e
 
 
 def _held_for_order(conn, hub_hex, dev_mode):
@@ -716,8 +730,7 @@ def _held_for_order(conn, hub_hex, dev_mode):
     row = conn.execute("SELECT card_json FROM hub_cards WHERE hub_id=?", (hub_hex,)).fetchone()
     if row is None:
         return None
-    card = proto.parse_json(row["card_json"].encode())
-    return verify_card(card, card["o"]["issued_ms"], dev_mode)
+    return _verify_stored(row, None, dev_mode)
 
 
 def accept_hub_card(conn, card, now_ms, dev_mode):
