@@ -328,7 +328,9 @@ def verify_card(card, now_ms, dev_mode, pinned_root=None, revoked_op_certs=froze
                 raise Refused("stale_card")
             if o["card_seq"] == held["card"]["card_seq"] and _cj(card) != _cj(held["signed"]):
                 raise Refused("stale_card")
-        if o["reader"] < held["card"]["reader"]:  # a hub never lowers its level (protocol.md section 5 step 7)
+        if (
+            o["reader"] < held["card"]["reader"]
+        ):  # a hub never lowers its level (protocol.md section 5 step 7)
             raise Refused("reader_downgrade")
     return {"card": o, "op_cert": op, "hk_op_pub": hk_op, "hk_root_pub": root, "signed": card}
 
