@@ -63,6 +63,8 @@ STATUS = {
     "binding_conflict": 409,
     "stale_binding": 409,
     "stale_card": 409,
+    "reader_downgrade": 409,
+    "held_card_invalid": 409,
     "stale_op_cert": 409,
 }
 
@@ -147,6 +149,10 @@ def _int_min(lo):
     return lambda x: type(x) is int and x >= lo
 
 
+def _uint31(x):
+    return type(x) is int and 0 <= x <= 2**31 - 1
+
+
 def _enum(*vals):
     return lambda x: type(x) is str and x in vals
 
@@ -189,6 +195,7 @@ FIELDS = {
         "relay_url": _relay_url,
         "tls_spki_sha256": _b64u32,
         "card_seq": _int_min(1),
+        "reader": _uint31,
         "issued_ms": _int_min(0),
         "dev": _bool,
     },
@@ -322,6 +329,10 @@ def verify_card(card, now_ms, dev_mode, pinned_root=None, revoked_op_certs=froze
                 raise Refused("stale_card")
             if o["card_seq"] == held["card"]["card_seq"] and _cj(card) != _cj(held["signed"]):
                 raise Refused("stale_card")
+        if (
+            o["reader"] < held["card"]["reader"]
+        ):  # a hub never lowers its level (protocol.md section 5 step 7)
+            raise Refused("reader_downgrade")
     return {"card": o, "op_cert": op, "hk_op_pub": hk_op, "hk_root_pub": root, "signed": card}
 
 
@@ -694,10 +705,23 @@ def held_hub_card(conn, hub_hex, now_ms, dev_mode):
     row = conn.execute("SELECT card_json FROM hub_cards WHERE hub_id=?", (hub_hex,)).fetchone()
     if row is None:
         return None
-    return verify_card(
-        proto.parse_json(row["card_json"].encode()), now_ms, dev_mode,
-        revoked_op_certs=revoked_op_certs(conn, hub_hex),
-    )  # fmt: skip
+    return _verify_stored(row, now_ms, dev_mode, revoked_op_certs=revoked_op_certs(conn, hub_hex))
+
+
+def _verify_stored(row, now_ms, dev_mode, **kw):
+    """Verify a stored card. A stored card that no longer verifies because of its shape (for example one stored
+    before a field was added) is `held_card_invalid`, a specific refusal: operators reset the stored card."""
+    try:
+        card = proto.parse_json(row["card_json"].encode())
+        return verify_card(
+            card, now_ms if now_ms is not None else card["o"]["issued_ms"], dev_mode, **kw
+        )
+    except Refused as r:
+        if r.code in ("malformed", "wrong_suite"):
+            raise Refused("held_card_invalid") from r
+        raise
+    except (KeyError, TypeError, ValueError) as e:
+        raise Refused("held_card_invalid") from e
 
 
 def _held_for_order(conn, hub_hex, dev_mode):
@@ -706,8 +730,7 @@ def _held_for_order(conn, hub_hex, dev_mode):
     row = conn.execute("SELECT card_json FROM hub_cards WHERE hub_id=?", (hub_hex,)).fetchone()
     if row is None:
         return None
-    card = proto.parse_json(row["card_json"].encode())
-    return verify_card(card, card["o"]["issued_ms"], dev_mode)
+    return _verify_stored(row, None, dev_mode)
 
 
 def accept_hub_card(conn, card, now_ms, dev_mode):

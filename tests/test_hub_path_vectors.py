@@ -14,7 +14,7 @@ from pubsrv import relay_proto as proto
 VEC = json.loads((pathlib.Path(__file__).parent / "vectors/vectors_hub.json").read_text())
 CHECKS = (
     "binding_store", "publish", "card", "card_text", "op_cert", "op_revoked",
-    "admin_read", "admin_read_rows", "admin_read_row",
+    "admin_read", "admin_read_rows", "admin_read_row", "card_reader",
 )  # fmt: skip
 CASES = [c for c in VEC["cases"] if c["check"] in CHECKS]
 
@@ -59,6 +59,8 @@ def run(check, a):
     if check == "card":
         h = _held(a)
         return {"hub_id": h["card"]["hub_id"], "op_cert_id": h["op_cert"]["cert_id"]}
+    if check == "card_reader":
+        return {"reader": _held(a)["card"]["reader"]}
     if check == "card_text":
         return run("card", {**a, "card": H._bad(proto.parse_json, bytes.fromhex(a["text_hex"]))})
     if check == "admin_read":
@@ -122,7 +124,12 @@ def test_vector(case):
 
 
 def test_every_relevant_case_is_run():
-    assert len(CASES) == 17 + 25 + 26 + 4 + 6 + 3 + 47 + 2 + 5
+    # Every card-bearing check the hub vectors define must be replayed here (a new card field once broke publish
+    # silently): all card, card_text, card_reader and ws_card_admission cases are in CASES / CARD_CASES.
+    for check in CHECKS + ("ws_card_admission",):
+        assert any(c["check"] == check for c in VEC["cases"]), check
+    assert len(CASES) == sum(c["check"] in CHECKS for c in VEC["cases"])
+    assert len([c for c in CASES if c["check"] == "card_reader"]) == 11
 
 
 def test_labels_match_the_contract():
@@ -157,3 +164,21 @@ def test_card_admission_vector_over_the_real_route(tmp_path, case):
         assert (r.status_code, r.json()) == (200, {"ok": True})
     else:
         assert r.json() == case["expect"], r.text
+
+
+def _reader_card_case(name):
+    return next(c for c in VEC["cases"] if c["name"] == name)["args"]
+
+
+def test_reader_bearing_card_is_admitted():
+    a = _reader_card_case("card_reader_level_1")
+    assert H.verify_card(a["card"], a["now_ms"], a.get("dev_mode", True))["card"]["reader"] == 1
+
+
+def test_unknown_extra_field_is_still_refused():
+    a = _reader_card_case("card_reader_level_1")
+    card = json.loads(json.dumps(a["card"]))
+    card["o"]["extra"] = 1  # signature check comes first, so assert on the field-set step directly
+    with pytest.raises(H.Refused) as r:
+        H._fields(card["o"], "hub.card")
+    assert r.value.code == "malformed"

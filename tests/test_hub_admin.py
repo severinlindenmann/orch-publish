@@ -269,3 +269,26 @@ def test_serve_dev_mode_flag_reaches_the_app(monkeypatch, tmp_path, flag, want):
     monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
     assert cli.main(["serve", "--data", str(tmp_path / "d"), *flag]) == 0
     assert seen["dev"] is want
+
+
+def test_held_card_stored_before_reader_gives_a_specific_refusal(env):
+    """No legacy path: a stored card that no longer verifies is a clear refusal (reset hub_cards), never a 500."""
+    from pubsrv import db
+
+    hub = Hub()
+    o = {
+        k: v for k, v in hub.card["o"].items() if k != "reader"
+    }  # the shape stored before the field existed
+    old = signed(hub.op, H.LABELS["sig_hub_card"], o, op_cert=hub.card["op_cert"])
+    conn = db.connect(env.path)
+    conn.execute(
+        "INSERT INTO hub_cards(hub_id, card_json, updated_ms) VALUES (?,?,?)",
+        (hub.id, json.dumps(old), NOW),
+    )
+    conn.commit()
+    r = card(env, hub)
+    assert (r.status_code, err(r)) == (409, "held_card_invalid")
+    conn.execute("DELETE FROM hub_cards")  # the reset the deploy note describes
+    conn.commit()
+    conn.close()
+    assert card(env, hub).status_code == 200
