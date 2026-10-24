@@ -63,6 +63,7 @@ STATUS = {
     "binding_conflict": 409,
     "stale_binding": 409,
     "stale_card": 409,
+    "reader_downgrade": 409,
     "stale_op_cert": 409,
 }
 
@@ -147,6 +148,10 @@ def _int_min(lo):
     return lambda x: type(x) is int and x >= lo
 
 
+def _uint31(x):
+    return type(x) is int and 0 <= x <= 2**31 - 1
+
+
 def _enum(*vals):
     return lambda x: type(x) is str and x in vals
 
@@ -189,6 +194,7 @@ FIELDS = {
         "relay_url": _relay_url,
         "tls_spki_sha256": _b64u32,
         "card_seq": _int_min(1),
+        "reader": _uint31,
         "issued_ms": _int_min(0),
         "dev": _bool,
     },
@@ -322,6 +328,8 @@ def verify_card(card, now_ms, dev_mode, pinned_root=None, revoked_op_certs=froze
                 raise Refused("stale_card")
             if o["card_seq"] == held["card"]["card_seq"] and _cj(card) != _cj(held["signed"]):
                 raise Refused("stale_card")
+        if o["reader"] < held["card"]["reader"]:  # a hub never lowers its level (protocol.md section 5 step 7)
+            raise Refused("reader_downgrade")
     return {"card": o, "op_cert": op, "hk_op_pub": hk_op, "hk_root_pub": root, "signed": card}
 
 

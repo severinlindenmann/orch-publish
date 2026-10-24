@@ -59,7 +59,7 @@ class Hub:
             {
                 **hdr, "kind": "hub.card", "hub_id": self.id, "hk_root_pub": proto.b64u(pub(self.root)),
                 "hxk_pub": proto.b64u(pub(newkey())), "relay_url": None,
-                "tls_spki_sha256": proto.b64u(os.urandom(32)), "card_seq": 1, "issued_ms": NOW - 1000, "dev": dev,
+                "tls_spki_sha256": proto.b64u(os.urandom(32)), "card_seq": 1, "reader": 1, "issued_ms": NOW - 1000, "dev": dev,
             },
             op_cert=op_cert,
         )  # fmt: skip
