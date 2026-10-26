@@ -131,6 +131,47 @@ def serve(args):
     return 0
 
 
+def combined_app(data_dir, api_host, dev_mode=False):
+    """No-domain mode: one ASGI app on one port. `/s/...` is the share server (path-based links), every other path
+    is the signed API. With a domain the two stay on separate origins (`serve` + `share`)."""
+    from .app import create_app
+    from .serve import create_share_app
+
+    api = create_app(data_dir, api_host, dev_mode=dev_mode)
+    share = create_share_app(data_dir)
+
+    async def app(scope, receive, send):
+        if scope["type"] == "http" and (scope.get("path") or "").startswith("/s/"):
+            return await share(scope, receive, send)
+        return await api(scope, receive, send)
+
+    app.state = api.state
+    return app
+
+
+def run_cmd(args):
+    """One address, one port, api and share together: `orch-publish run --data D --listen IP:PORT`."""
+    from urllib.parse import urlsplit
+
+    host, _, port = args.listen.rpartition(":")
+    if not host or not port.isdigit():
+        print("--listen must be ADDRESS:PORT", file=sys.stderr)
+        return 2
+    origin = args.public_origin or f"http://{args.listen}"
+    u = urlsplit(origin)
+    if u.scheme not in ("http", "https") or not u.netloc or u.path not in ("", "/"):
+        print("--public-origin must be http(s)://HOST[:PORT] with no path", file=sys.stderr)
+        return 2
+    try:
+        app = combined_app(args.data, u.netloc.lower(), dev_mode=args.dev_mode)
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 2
+    print(f"orch-publish: listening on {args.listen}; links open at {origin}/s/<id>", flush=True)
+    _uvicorn_server(app, host.strip("[]"), int(port)).run()
+    return 0
+
+
 def _loopback_port(value, what):
     host, _, port = value.rpartition(":")
     if host not in LOOPBACK or not port.isdigit():
@@ -237,6 +278,17 @@ def main(argv=None):
         action="store_true",
         help="dev instance: accepts only dev hub objects (dev: true) and refuses real ones",
     )
+    r = sub.add_parser("run", help="no domain: API and share links on ONE address and port")
+    r.add_argument("--data", required=True)
+    r.add_argument("--listen", required=True, help="ADDRESS:PORT to bind, e.g. 100.64.0.5:8102")
+    r.add_argument(
+        "--public-origin",
+        default=None,
+        help="http(s)://HOST[:PORT] clients use (default: http://LISTEN)",
+    )
+    r.add_argument(
+        "--dev-mode", action="store_true", help="dev instance: accepts only dev hub objects"
+    )
     w2 = sub.add_parser("share", help="run the share server (public origin) on loopback")
     w2.add_argument("--data", required=True)
     w2.add_argument("--share-host", default="127.0.0.1:8104")
@@ -270,7 +322,7 @@ def main(argv=None):
         "id", type=_id
     )
     args = p.parse_args(argv)
-    run = {"serve": serve, "share": share, "dev": dev}.get(args.cmd, admin)
+    run = {"serve": serve, "share": share, "dev": dev, "run": run_cmd}.get(args.cmd, admin)
     try:
         return run(args)
     except db.SchemaError as e:
