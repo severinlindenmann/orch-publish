@@ -281,8 +281,14 @@ def main(argv=None):
     r = sub.add_parser("run", help="no domain: API and share links on ONE address and port")
     r.add_argument("--data", required=True)
     r.add_argument("--listen", required=True, help="ADDRESS:PORT to bind, e.g. 100.64.0.5:8102")
-    r.add_argument("--public-origin", default=None, help="http(s)://HOST[:PORT] clients use (default: http://LISTEN)")
-    r.add_argument("--dev-mode", action="store_true", help="dev instance: accepts only dev hub objects")
+    r.add_argument(
+        "--public-origin",
+        default=None,
+        help="http(s)://HOST[:PORT] clients use (default: http://LISTEN)",
+    )
+    r.add_argument(
+        "--dev-mode", action="store_true", help="dev instance: accepts only dev hub objects"
+    )
     w2 = sub.add_parser("share", help="run the share server (public origin) on loopback")
     w2.add_argument("--data", required=True)
     w2.add_argument("--share-host", default="127.0.0.1:8104")

@@ -19,5 +19,15 @@ def test_one_port_serves_share_and_api(tmp_path):
 
 
 def test_run_rejects_bad_origin(tmp_path, capsys):
-    rc = cli.main(["run", "--data", str(tmp_path / "d"), "--listen", "127.0.0.1:1", "--public-origin", "http://x/p"])
+    rc = cli.main(
+        [
+            "run",
+            "--data",
+            str(tmp_path / "d"),
+            "--listen",
+            "127.0.0.1:1",
+            "--public-origin",
+            "http://x/p",
+        ]
+    )
     assert rc == 2
