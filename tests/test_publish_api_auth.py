@@ -19,7 +19,7 @@ from tests.hub_helpers import Hub, binding, build
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 VEC = json.loads((ROOT / "tests/vectors/publish_v2.json").read_text())
-VENDORED_SHA256 = "4b7cd9aa524b5d808859b9cff54ea3c025dab5791c13966683e9f88657b9c1b0"
+VENDORED_SHA256 = "9f5a070301c6a440dc9c1a2c8fd4a21fdd49fa53b49cee599645d66c919f7382"
 HOST = "127.0.0.1:8103"
 NOW = 1_790_000_000_000
 WS_A = VEC["ids"]["workspace_a"]
